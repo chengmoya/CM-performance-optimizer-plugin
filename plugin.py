@@ -374,7 +374,7 @@ config_fields = {
     "modules": {
         "message_cache_enabled": ConfigField(type=bool, default=True, description="消息缓存: 拦截find_messages数据库查询，缓存结果避免重复查询。命中率通常>95%，可节省大量数据库IO"),
         "person_cache_enabled": ConfigField(type=bool, default=True, description="人物信息缓存: 拦截人物信息加载，按QQ号缓存昵称等信息。人物信息变化慢，缓存效果好"),
-        "expression_cache_enabled": ConfigField(type=bool, default=False, description="表达式缓存: 缓存表情包查询结果 (开发中，暂不可用)"),
+        "expression_cache_enabled": ConfigField(type=bool, default=False, description="表达式缓存: 缓存表达式查询结果 (开发中，暂不可用)"),
         "slang_cache_enabled": ConfigField(type=bool, default=False, description="黑话缓存: 缓存黑话/网络用语查询 (开发中，暂不可用)"),
     },
     # ===== 消息缓存配置 (第3个标签页) =====
@@ -385,7 +385,7 @@ config_fields = {
     # ===== 人物信息缓存配置 (第4个标签页) =====
     "person_cache": {
         "max_size": ConfigField(type=int, default=3000, description="最大缓存条目数。每条约占用0.5-2KB内存，3000条约占用1.5-6MB。建议大于活跃用户数", min=100, max=10000),
-        "ttl": ConfigField(type=int, default=1800, description="缓存过期时间(秒)。人物信息变化慢，建议1800秒(30分钟)。改名后需等待过期才会更新", min=60, max=7200),
+        "ttl": ConfigField(type=int, default=1800, description="缓存过期时间(秒)。人物信息变化慢，建议1800秒(30分钟)。过期后自动刷新", min=60, max=7200),
     },
 }
 

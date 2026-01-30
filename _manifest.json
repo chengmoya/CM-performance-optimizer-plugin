@@ -5,14 +5,14 @@
   "description": "通过缓存数据库查询结果来优化MaiBot性能。包含消息缓存和人物信息缓存两个模块，可减少95%以上的数据库查询，显著降低响应延迟",
   "author": {
     "name": "城陌",
-    "url": "https://github.com/chengmo"
+    "url": "https://github.com/chengmoya"
   },
   "license": "GPL-3.0",
   "host_application": {
     "min_version": "0.11.0",
     "max_version": "1.0.0"
   },
-  "repository_url": "",
+  "repository_url": "https://github.com/chengmoya/CM-performance-optimizer-plugin",
   "keywords": [
     "性能优化",
     "缓存",
@@ -54,5 +54,5 @@
       "slang_cache_enabled": false
     }
   },
-  "id": "chengmo.CM-performance-optimizer"
+  "id": "chengmoya.CM-performance-optimizer"
 }
