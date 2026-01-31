@@ -1,15 +1,15 @@
 {
   "manifest_version": 1,
   "name": "CM性能优化插件",
-  "version": "3.0.0",
-  "description": "通过缓存数据库查询结果来优化MaiBot性能。包含消息缓存和人物信息缓存两个模块，可减少95%以上的数据库查询，显著降低响应延迟",
+  "version": "4.2.0",
+  "description": "通过缓存数据库查询结果来优化MaiBot性能。包含消息缓存、人物信息缓存、表达式缓存、黑话缓存、知识库图谱缓存和预加载六个模块，可减少95%以上的数据库查询，显著降低响应延迟",
   "author": {
     "name": "城陌",
     "url": "https://github.com/chengmoya"
   },
   "license": "GPL-3.0",
   "host_application": {
-    "min_version": "0.11.0",
+    "min_version": "0.12.2",
     "max_version": "1.0.0"
   },
   "repository_url": "https://github.com/chengmoya/CM-performance-optimizer-plugin",
@@ -19,6 +19,9 @@
     "数据库",
     "消息缓存",
     "人物缓存",
+    "表达式缓存",
+    "黑话缓存",
+    "预加载",
     "performance",
     "cache",
     "optimization"
@@ -44,6 +47,22 @@
     "person_cache": {
       "enabled": true,
       "description": "人物信息缓存 - 缓存用户昵称等信息，命中率>90%"
+    },
+    "expression_cache": {
+      "enabled": false,
+      "description": "表达式缓存 - 双缓冲+缓慢加载+原子切换，全量缓存表达式数据"
+    },
+    "slang_cache": {
+      "enabled": false,
+      "description": "黑话缓存 - 双缓冲+缓慢加载+原子切换+内容索引，O(1)查找速度"
+    },
+    "kg_cache": {
+      "enabled": false,
+      "description": "知识库图谱缓存 - 双缓冲+缓慢加载+原子切换，全量缓存知识库图谱数据，查询速度提升80-90%"
+    },
+    "preload": {
+      "enabled": false,
+      "description": "预加载 - 异步预加载聊天流的消息和人物信息，首次查询性能提升90%以上"
     }
   },
   "configuration": {
@@ -51,7 +70,9 @@
       "message_cache_enabled": true,
       "person_cache_enabled": true,
       "expression_cache_enabled": false,
-      "slang_cache_enabled": false
+      "slang_cache_enabled": false,
+      "kg_cache_enabled": false,
+      "preload_enabled": false
     }
   },
   "id": "chengmoya.CM-performance-optimizer"

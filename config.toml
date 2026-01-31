@@ -1,10 +1,13 @@
 # =====================================================
-# CM 性能优化插件配置 v3.0.0
-# 
+# CM 性能优化插件配置 v4.1.0
+#
 # 功能说明：
 #   通过缓存数据库查询结果来优化MaiBot性能
 #   - 消息缓存：拦截find_messages查询，命中率>95%
 #   - 人物信息缓存：拦截人物信息查询，命中率>90%
+#   - 表达式缓存：双缓冲+缓慢加载+原子切换，全量缓存
+#   - 黑话缓存：双缓冲+缓慢加载+原子切换+内容索引
+#   - 预加载：异步预加载聊天流数据，首次查询性能提升90%以上
 #
 # 内存占用：约10-20MB (取决于缓存大小配置)
 # CPU开销：极低，仅在缓存未命中时有额外开销
@@ -15,25 +18,62 @@
 # ============ 插件基本配置 ============
 [plugin]
 enabled = true          # 是否启用插件
-version = "3.0.0"       # 插件版本
+version = "4.1.0"       # 插件版本
 report_interval = 60    # 统计报告间隔(秒)，设置0可关闭
 log_level = "DEBUG"     # 日志等级: DEBUG/INFO/WARNING/ERROR
 
 # ============ 功能模块开关 ============
+
 [modules]
 message_cache_enabled = true    # 消息缓存 - 缓存find_messages查询
 person_cache_enabled = true     # 人物信息缓存 - 缓存昵称等信息
-expression_cache_enabled = false # 表达式缓存 (开发中)
-slang_cache_enabled = false      # 黑话缓存 (开发中)
+expression_cache_enabled = true # 表达式缓存 - 双缓冲+缓慢加载
+slang_cache_enabled = true      # 黑话缓存 - 双缓冲+缓慢加载+内容索引
+preload_enabled = true          # 预加载 - 异步预加载聊天流数据
 
 # ============ 消息缓存配置 ============
 # 每条约1-5KB，2000条约占用2-10MB内存
+kg_cache_enabled = true
+
 [message_cache]
 max_size = 2000         # 缓存最大条目数
-ttl = 120.0             # 缓存过期时间(秒)
+ttl = 180             # 缓存过期时间(秒)
 
 # ============ 人物信息缓存配置 ============
 # 每条约0.5-2KB，3000条约占用1.5-6MB内存
+
 [person_cache]
 max_size = 3000         # 缓存最大条目数
 ttl = 1800              # 缓存过期时间(秒) 30分钟
+
+# ============ 表达式缓存配置 ============
+# 双缓冲+缓慢加载+原子切换，避免CPU峰值
+# 2万条约需10秒加载完成 (batch_size=100, batch_delay=0.05)
+
+[expression_cache]
+batch_size = 100        # 每批加载条数
+batch_delay = "0.1"      # 批次间延迟(秒)
+refresh_interval = 3600 # 自动刷新间隔(秒)，0表示不自动刷新
+
+# ============ 黑话缓存配置 ============
+# 双缓冲+缓慢加载+原子切换+内容索引，O(1)查找
+# 2万条约需10秒加载完成 (batch_size=100, batch_delay=0.05)
+
+[slang_cache]
+batch_size = 100        # 每批加载条数
+batch_delay = "0.1"      # 批次间延迟(秒)
+refresh_interval = 3600 # 自动刷新间隔(秒)，0表示不自动刷新
+enable_content_index = true  # 启用内容索引，O(1)查找速度
+
+# ============ 预加载配置 ============
+# 异步预加载聊天流数据，首次查询性能提升90%以上
+
+[preload]
+max_streams = 10        # 最多预加载的聊天流数量
+message_count = 50      # 每个聊天流预加载的消息数量
+max_persons_per_stream = 50  # 每个聊天流预加载的最大人物数量
+preload_delay = "0.1"   # 预加载延迟(秒)
+
+[kg_cache]
+refresh_interval = 3600
+batch_delay = "0.1"
