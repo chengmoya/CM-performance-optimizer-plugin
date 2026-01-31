@@ -1,5 +1,5 @@
 # =====================================================
-# CM 性能优化插件配置 v4.1.0
+# CM 性能优化插件配置 v4.3.1
 #
 # 功能说明：
 #   通过缓存数据库查询结果来优化MaiBot性能
@@ -18,11 +18,12 @@
 # ============ 插件基本配置 ============
 [plugin]
 enabled = true          # 是否启用插件
-version = "4.1.0"       # 插件版本
+version = "4.3.1"       # 插件版本
 report_interval = 60    # 统计报告间隔(秒)，设置0可关闭
 log_level = "DEBUG"     # 日志等级: DEBUG/INFO/WARNING/ERROR
 
 # ============ 功能模块开关 ============
+memory_stats_enabled = true
 
 [modules]
 message_cache_enabled = true    # 消息缓存 - 缓存find_messages查询

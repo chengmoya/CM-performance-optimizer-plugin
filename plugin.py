@@ -1,5 +1,5 @@
 """
-CM 性能优化插件 v4.1.0
+CM 性能优化插件 v4.3.1
 
 功能模块：
 1. 消息缓存 (message_cache) - 缓存 find_messages 查询结果
@@ -44,6 +44,44 @@ except ImportError:
 logger = get_logger("CM_perf_opt")
 
 
+# ===== 内存测量工具类 =====
+class MemoryUtils:
+    """内存测量工具类 - 递归计算对象的内存占用"""
+    
+    @staticmethod
+    def get_size(obj, seen=None):
+        """递归计算对象的内存占用（字节）"""
+        if seen is None:
+            seen = set()
+        
+        obj_id = id(obj)
+        if obj_id in seen:
+            return 0
+        
+        seen.add(obj_id)
+        size = sys.getsizeof(obj)
+        
+        # 处理常见容器类型
+        if isinstance(obj, dict):
+            size += sum(MemoryUtils.get_size(k, seen) + MemoryUtils.get_size(v, seen) for k, v in obj.items())
+        elif isinstance(obj, (list, tuple, set, frozenset)):
+            size += sum(MemoryUtils.get_size(i, seen) for i in obj)
+        elif isinstance(obj, OrderedDict):
+            size += sum(MemoryUtils.get_size(k, seen) + MemoryUtils.get_size(v, seen) for k, v in obj.items())
+        
+        return size
+    
+    @staticmethod
+    def format_size(bytes_size):
+        """将字节转换为易读的格式"""
+        if bytes_size < 1024:
+            return f"{bytes_size:.2f} B"
+        elif bytes_size < 1024 * 1024:
+            return f"{bytes_size / 1024:.2f} KB"
+        else:
+            return f"{bytes_size / (1024 * 1024):.2f} MB"
+
+
 # ===== 通用缓存类 =====
 class TTLCache:
     """带TTL的LRU缓存"""
@@ -81,6 +119,13 @@ class TTLCache:
             self.ts.clear()
     
     def size(self): return len(self.data)
+    
+    def get_memory_usage(self):
+        """获取缓存内存使用量（字节）"""
+        with self.lock:
+            data_size = MemoryUtils.get_size(self.data)
+            ts_size = MemoryUtils.get_size(self.ts)
+            return data_size + ts_size
 
 
 # ===== 统计类 =====
@@ -371,6 +416,13 @@ class ExpressionCacheModule:
         """获取缓存大小"""
         with self.buffer_lock:
             return len(self.buffer_a) if self.buffer_a else 0
+    
+    def get_memory_usage(self):
+        """获取缓存内存使用量（字节）"""
+        with self.buffer_lock:
+            if self.buffer_a is None:
+                return 0
+            return MemoryUtils.get_size(self.buffer_a)
 
 
 # ===== 黑话缓存模块 (双缓冲 + 缓慢加载) =====
@@ -497,6 +549,16 @@ class JargonCacheModule:
         """获取缓存大小"""
         with self.buffer_lock:
             return len(self.buffer_a) if self.buffer_a else 0
+    
+    def get_memory_usage(self):
+        """获取缓存内存使用量（字节）"""
+        with self.buffer_lock:
+            if self.buffer_a is None:
+                return 0
+            size = MemoryUtils.get_size(self.buffer_a)
+            if self.content_index_a is not None:
+                size += MemoryUtils.get_size(self.content_index_a)
+            return size
 
 
 # ===== 知识库图谱缓存模块 (双缓冲 + 缓慢加载) =====
@@ -657,6 +719,24 @@ class KGCacheModule:
                 "entities": len(self.ent_appear_cnt_a),
                 "paragraphs": len(self.stored_paragraph_hashes_a),
             }
+    
+    def get_memory_usage(self):
+        """获取缓存内存使用量（字节）"""
+        with self.buffer_lock:
+            if self.buffer_a is None:
+                return 0
+            size = 0
+            if self.graph_a is not None:
+                size += MemoryUtils.get_size(self.graph_a)
+            if self.nodes_a is not None:
+                size += MemoryUtils.get_size(self.nodes_a)
+            if self.edges_a is not None:
+                size += MemoryUtils.get_size(self.edges_a)
+            if self.ent_appear_cnt_a is not None:
+                size += MemoryUtils.get_size(self.ent_appear_cnt_a)
+            if self.stored_paragraph_hashes_a is not None:
+                size += MemoryUtils.get_size(self.stored_paragraph_hashes_a)
+            return size
 
 
 # ===== 预加载管理器 =====
@@ -697,6 +777,13 @@ class PreloadManager:
                 "max_streams": self.max_streams,
                 "streams": list(self.preloaded_streams)
             }
+    
+    def get_memory_usage(self):
+        """获取预加载管理器内存使用量（字节）"""
+        with self.lock:
+            size = MemoryUtils.get_size(self.preloaded_streams)
+            size += MemoryUtils.get_size(self.stream_last_active)
+            return size
 
 
 # ===== 预加载事件处理器 =====
@@ -782,6 +869,12 @@ class Optimizer:
         self.interval = cfg.get("report_interval", 60)
         self.modules_cfg = cfg.get("modules", {})
         
+        # 内存统计配置
+        self.memory_stats_enabled = cfg.get("memory_stats_enabled", True)
+        self.memory_stats_cache_ttl = cfg.get("memory_stats_cache_ttl", 60)
+        self._memory_stats_cache = {}  # 模块内存统计缓存: {module_name: (timestamp, size)}
+        self._memory_stats_lock = threading.Lock()
+        
         # 初始化模块
         self.msg_cache = None
         self.person_cache = None
@@ -839,6 +932,29 @@ class Optimizer:
         
         self._running = False
         self._ready = True
+    
+    def _get_module_memory_usage(self, module, module_name):
+        """获取模块内存使用量（带缓存）"""
+        if not self.memory_stats_enabled:
+            return 0
+        
+        current_time = time.time()
+        
+        with self._memory_stats_lock:
+            # 检查缓存
+            if module_name in self._memory_stats_cache:
+                cache_time, cache_size = self._memory_stats_cache[module_name]
+                if current_time - cache_time < self.memory_stats_cache_ttl:
+                    return cache_size
+            
+            # 重新测量
+            try:
+                size = module.get_memory_usage()
+                self._memory_stats_cache[module_name] = (current_time, size)
+                return size
+            except Exception as e:
+                logger.debug(f"[MemoryStats] 获取 {module_name} 内存失败: {e}")
+                return 0
     
     def apply_patches(self):
         if self.msg_cache:
@@ -1135,6 +1251,25 @@ class Optimizer:
             report_lines.extend(self._build_kg_cache_stats_lines("🧠 知识库图谱缓存", self.kg_cache))
             report_lines.append("")
         
+        # 计算总内存占用
+        if self.memory_stats_enabled:
+            total_memory = 0
+            if self.msg_cache:
+                total_memory += self._get_module_memory_usage(self.msg_cache, "message_cache")
+            if self.person_cache:
+                total_memory += self._get_module_memory_usage(self.person_cache, "person_cache")
+            if self.expr_cache:
+                total_memory += self._get_module_memory_usage(self.expr_cache, "expression_cache")
+            if self.jargon_cache:
+                total_memory += self._get_module_memory_usage(self.jargon_cache, "jargon_cache")
+            if self.kg_cache:
+                total_memory += self._get_module_memory_usage(self.kg_cache, "kg_cache")
+            if self.preload_manager:
+                total_memory += self._get_module_memory_usage(self.preload_manager, "preload_manager")
+            
+            report_lines.append(f"📊 总内存占用: {MemoryUtils.format_size(total_memory)}")
+            report_lines.append("")
+        
         report_lines.append("=" * 80)
         
         # 一次性打印所有行，减少日志系统开销
@@ -1162,8 +1297,14 @@ class Optimizer:
         avg_time = t_time / t["t_miss"] if t["t_miss"] > 0 else 0.02
         saved = t["t_hit"] * avg_time
         
+        # 获取内存占用
+        memory_str = ""
+        if self.memory_stats_enabled:
+            memory_bytes = self._get_module_memory_usage(module, name)
+            memory_str = f" | 内存: {MemoryUtils.format_size(memory_bytes)}"
+        
         lines.append(f"{name}")
-        lines.append(f"  状态: {loading_status} | 大小: {size}条 | 上次刷新: {last_refresh_str}")
+        lines.append(f"  状态: {loading_status} | 大小: {size}条{memory_str} | 上次刷新: {last_refresh_str}")
         if module.refresh_interval > 0:
             lines.append(f"  自动刷新: 每{module.refresh_interval}秒")
         lines.append(f"  累计: 命中 {t['t_hit']} | 未命中 {t['t_miss']} | 被过滤 {t['t_filtered']} | 命中率 {t_rate:.1f}%")
@@ -1188,8 +1329,14 @@ class Optimizer:
         avg_time = t_time / t["t_miss"] if t["t_miss"] > 0 else 0.03
         saved = t["t_hit"] * avg_time
         
+        # 获取内存占用
+        memory_str = ""
+        if self.memory_stats_enabled:
+            memory_bytes = self._get_module_memory_usage(module, name)
+            memory_str = f" | 内存: {MemoryUtils.format_size(memory_bytes)}"
+        
         lines.append(f"{name}")
-        lines.append(f"  缓存: {module.cache.size()}/{module.cache.max_size} | TTL: {module.cache.ttl}秒")
+        lines.append(f"  缓存: {module.cache.size()}/{module.cache.max_size} | TTL: {module.cache.ttl}秒{memory_str}")
         lines.append(f"  累计: 命中 {t['t_hit']} | 未命中 {t['t_miss']} | 被过滤 {t['t_filtered']} | 命中率 {t_rate:.1f}%")
         lines.append(f"  累计: 快 {t['t_fast']}次/{t['t_fast_time']:.2f}s | 慢 {t['t_slow']}次/{t['t_slow_time']:.2f}s")
         lines.append(f"  本期: 命中 {i['i_hit']} | 未命中 {i['i_miss']} | 被过滤 {i['i_filtered']} | 命中率 {i_rate:.1f}%")
@@ -1224,8 +1371,14 @@ class Optimizer:
         avg_time = t_time / t["t_miss"] if t["t_miss"] > 0 else 0.5
         saved = t["t_hit"] * avg_time
         
+        # 获取内存占用
+        memory_str = ""
+        if self.memory_stats_enabled:
+            memory_bytes = self._get_module_memory_usage(module, name)
+            memory_str = f" | 内存: {MemoryUtils.format_size(memory_bytes)}"
+        
         lines.append(f"{name}")
-        lines.append(f"  状态: {loading_status} | 大小: {size_str} | 上次刷新: {last_refresh_str}")
+        lines.append(f"  状态: {loading_status} | 大小: {size_str}{memory_str} | 上次刷新: {last_refresh_str}")
         if module.refresh_interval > 0:
             lines.append(f"  自动刷新: 每{module.refresh_interval}秒")
         lines.append(f"  累计: 命中 {t['t_hit']} | 未命中 {t['t_miss']} | 被过滤 {t['t_filtered']} | 命中率 {t_rate:.1f}%")
@@ -1260,9 +1413,11 @@ config_fields = {
     # ===== 插件基本配置 (第1个标签页) =====
     "plugin": {
         "enabled": ConfigField(type=bool, default=True, description="是否启用插件"),
-        "version": ConfigField(type=str, default="4.1.0", description="插件版本号，用于追踪更新"),
+        "version": ConfigField(type=str, default="4.3.1", description="插件版本号，用于追踪更新"),
         "report_interval": ConfigField(type=int, default=60, description="统计报告输出间隔(秒)，设置0可关闭定时报告", min=0, max=600),
         "log_level": ConfigField(type=str, default="INFO", description="日志输出等级", choices=["DEBUG", "INFO", "WARNING", "ERROR"]),
+        "memory_stats_enabled": ConfigField(type=bool, default=True, description="内存统计: 在统计报告中显示各模块的内存占用情况。关闭后不显示内存信息，可减少CPU开销"),
+        "memory_stats_cache_ttl": ConfigField(type=int, default=60, description="内存统计缓存时间(秒)。内存测量有一定开销，缓存结果可避免频繁测量。建议60-300秒", min=10, max=600),
     },
     # ===== 模块开关 (第2个标签页) =====
     "modules": {
@@ -1390,7 +1545,7 @@ config_layout = ConfigLayout(
 @register_plugin
 class PerformanceOptimizerPlugin(BasePlugin):
     plugin_name = "CM-performance-optimizer"
-    plugin_version = "4.2.0"
+    plugin_version = "4.3.1"
     plugin_description = "性能优化 - 消息缓存 + 人物信息缓存 + 表达式缓存 + 黑话缓存 + 知识库图谱缓存 + 预加载"
     plugin_author = "城陌"
     enable_plugin = True
@@ -1404,7 +1559,7 @@ class PerformanceOptimizerPlugin(BasePlugin):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         global _opt
-        logger.info("[PerfOpt] CM-performance-optimizer v4.2.0 启动")
+        logger.info("[PerfOpt] CM-performance-optimizer v4.3.1 启动")
         
         try:
             cfg = {
