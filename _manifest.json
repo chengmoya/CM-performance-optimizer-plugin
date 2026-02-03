@@ -1,8 +1,8 @@
 {
   "manifest_version": 1,
   "name": "CM性能优化插件",
-  "version": "4.3.1",
-  "description": "通过缓存数据库查询结果来优化MaiBot性能。包含消息缓存、人物信息缓存、表达式缓存、黑话缓存、知识库图谱缓存和预加载六个模块，可减少95%以上的数据库查询，显著降低响应延迟",
+  "version": "4.5.0",
+  "description": "通过缓存数据库查询结果来优化MaiBot性能。包含消息缓存（查询模式/全量模式）、消息热集、人物信息缓存、表达式缓存、黑话缓存、知识库图谱缓存六个模块，可减少95%以上的数据库查询，显著降低响应延迟",
   "author": {
     "name": "城陌",
     "url": "https://github.com/chengmoya"
@@ -21,7 +21,6 @@
     "人物缓存",
     "表达式缓存",
     "黑话缓存",
-    "预加载",
     "performance",
     "cache",
     "optimization"
@@ -36,13 +35,36 @@
     "缓存"
   ],
   "dependencies": [],
-  "python_dependencies": [],
+  "python_dependencies": [
+    {
+      "name": "pandas",
+      "version": ">=1.0.0",
+      "optional": true,
+      "description": "知识库图谱缓存所需（用于数据处理）"
+    },
+    {
+      "name": "pyarrow",
+      "version": ">=10.0.0",
+      "optional": true,
+      "description": "知识库图谱缓存所需（用于高效数据序列化）"
+    },
+    {
+      "name": "quick-algo",
+      "version": ">=0.1.0",
+      "optional": true,
+      "description": "知识库图谱缓存所需（用于图数据处理）"
+    }
+  ],
   "config_file": "config.toml",
   "enabled": true,
   "features": {
     "message_cache": {
       "enabled": true,
-      "description": "消息缓存 - 缓存find_messages查询结果，命中率>95%"
+      "description": "消息缓存 - 支持查询模式（命中率>95%）和全量模式（数据库镜像，100%命中率）"
+    },
+    "message_cache_hotset": {
+      "enabled": true,
+      "description": "消息热集 - 按 chat 缓存最近 N 条消息；首次访问后台预热，不阻塞；滑动窗口范围查询可优先命中热集"
     },
     "person_cache": {
       "enabled": true,
@@ -60,9 +82,9 @@
       "enabled": false,
       "description": "知识库图谱缓存 - 双缓冲+缓慢加载+原子切换，全量缓存知识库图谱数据，查询速度提升80-90%"
     },
-    "preload": {
+    "full_message_cache": {
       "enabled": false,
-      "description": "预加载 - 异步预加载聊天流的消息和人物信息，首次查询性能提升90%以上"
+      "description": "全量消息缓存 - 数据库镜像模式，双缓冲+缓慢加载+原子切换+增量加载+LRU淘汰，100%命中率"
     }
   },
   "configuration": {
@@ -71,8 +93,7 @@
       "person_cache_enabled": true,
       "expression_cache_enabled": false,
       "slang_cache_enabled": false,
-      "kg_cache_enabled": false,
-      "preload_enabled": false
+      "kg_cache_enabled": false
     }
   },
   "id": "chengmoya.CM-performance-optimizer"

@@ -1,80 +1,148 @@
-# =====================================================
-# CM 性能优化插件配置 v4.3.1
-#
-# 功能说明：
-#   通过缓存数据库查询结果来优化MaiBot性能
-#   - 消息缓存：拦截find_messages查询，命中率>95%
-#   - 人物信息缓存：拦截人物信息查询，命中率>90%
-#   - 表达式缓存：双缓冲+缓慢加载+原子切换，全量缓存
-#   - 黑话缓存：双缓冲+缓慢加载+原子切换+内容索引
-#   - 预加载：异步预加载聊天流数据，首次查询性能提升90%以上
-#
-# 内存占用：约10-20MB (取决于缓存大小配置)
-# CPU开销：极低，仅在缓存未命中时有额外开销
-#
-# 依赖：无额外依赖，使用Python标准库
-# =====================================================
+# CM-performance-optimizer - 自动生成的配置文件
+# 通过缓存数据库查询结果来优化MaiBot性能。包含消息缓存、消息热集、人物信息缓存、表达式缓存、黑话缓存、知识库图谱缓存六个模块，可减少95%以上的数据库查询，显著降低响应延迟
 
-# ============ 插件基本配置 ============
+# ConfigSection(title='插件设置', description='基础配置：启用/禁用、统计报告间隔、日志等级。内存占用约10-20MB，CPU开销极低', icon='🔧', collapsed=False, order=0)
 [plugin]
-enabled = true          # 是否启用插件
-version = "4.3.1"       # 插件版本
-report_interval = 60    # 统计报告间隔(秒)，设置0可关闭
-log_level = "DEBUG"     # 日志等级: DEBUG/INFO/WARNING/ERROR
 
-# ============ 功能模块开关 ============
+# 是否启用插件
+enabled = true
+
+# 配置结构版本号（用于自动迁移/生成默认配置）
+config_version = "4.5.0"
+
+# 插件版本号，用于追踪更新
+version = "4.5.0"
+
+# 统计报告输出间隔(秒)，设置0可关闭定时报告
+report_interval = 60
+
+# 日志输出等级
+# 可选值: DEBUG, INFO, WARNING, ERROR
+log_level = "INFO"
+
+# 内存统计: 在统计报告中显示各模块的内存占用情况。关闭后不显示内存信息，可减少CPU开销
 memory_stats_enabled = true
 
-[modules]
-message_cache_enabled = true    # 消息缓存 - 缓存find_messages查询
-person_cache_enabled = true     # 人物信息缓存 - 缓存昵称等信息
-expression_cache_enabled = true # 表达式缓存 - 双缓冲+缓慢加载
-slang_cache_enabled = true      # 黑话缓存 - 双缓冲+缓慢加载+内容索引
-preload_enabled = true          # 预加载 - 异步预加载聊天流数据
+# 内存统计缓存时间(秒)。内存测量有一定开销，缓存结果可避免频繁测量。建议60-300秒
+memory_stats_cache_ttl = 60
 
-# ============ 消息缓存配置 ============
-# 每条约1-5KB，2000条约占用2-10MB内存
+# ConfigSection(title='功能模块', description='选择启用的缓存模块。消息缓存命中率通常>95%，人物信息缓存命中率>90%。可根据需要单独开关', icon='📦', collapsed=False, order=1)
+
+[modules]
+
+# 消息缓存: 拦截find_messages数据库查询，缓存结果避免重复查询。命中率通常>95%，可节省大量数据库IO
+message_cache_enabled = true
+
+# 人物信息缓存: 拦截人物信息加载，按QQ号缓存昵称等信息。人物信息变化慢，缓存效果好
+person_cache_enabled = true
+
+# 表达式缓存: 双缓冲+缓慢加载+原子切换，全量缓存表达式数据。启动后约10秒完成加载
+expression_cache_enabled = true
+
+# 黑话缓存: 双缓冲+缓慢加载+原子切换+内容索引，O(1)查找速度。启动后约10秒完成加载
+slang_cache_enabled = true
+
+# 知识库图谱缓存: 双缓冲+缓慢加载+原子切换，全量缓存知识库图谱数据。启动后约5-10秒完成加载，查询速度提升80-90%
 kg_cache_enabled = true
 
-[message_cache]
-max_size = 2000         # 缓存最大条目数
-ttl = 180             # 缓存过期时间(秒)
+# ConfigSection(title='消息缓存', description='缓存消息查询结果。原理：拦截数据库查询，相同参数直接返回缓存。效果：减少约95%的数据库查询', icon='💬', collapsed=True, order=2)
 
-# ============ 人物信息缓存配置 ============
-# 每条约0.5-2KB，3000条约占用1.5-6MB内存
+[message_cache]
+
+# 最大缓存条目数。每条约占用1-5KB内存，2000条约占用2-10MB。超过后自动清理最旧的条目
+max_size = 2000
+
+# 缓存过期时间(秒)。消息变化快，建议60-180秒。过长可能导致消息不同步
+ttl = 120
+
+# ConfigSection(title='消息热集', description='按 chat 缓存最近 N 条消息，用于加速 get_recent_messages 这类滑动窗口查询。策略：首次访问不阻塞（后台预热）；预热完成后优先命中热集，否则回退数据库', icon='🔥', collapsed=True, order=3)
+cache_mode = "full"
+
+[message_cache_hotset]
+
+# 启用消息热集缓存（按 chat 保存最近 N 条消息）。首次访问不阻塞：后台预热；预热完成后范围查询可直接命中热集
+enabled = true
+
+# 每个 chat 缓存最近多少条消息（建议 100-400）
+per_chat_limit = 200
+
+# 单个 chat 热集的有效期(秒)。过期后将重新预热。当聊天流激活时此限制会被忽略
+ttl = 300
+
+# 最多同时维护多少个 chat 的热集（LRU淘汰）
+max_chats = 500
+
+# （默认关闭）对滑动窗口查询的 end_time 做分桶归一化，提高 query-cache 命中率；开启后会进行二次过滤保证正确
+bucket_enabled = true
+
+# 分桶粒度(秒)。仅 bucket_enabled=true 时生效
+bucket_seconds = 5
+
+# （默认开启）当聊天流激活时，忽略时间限制，直接返回最近 N 条消息。这样可以提高聊天流激活时的缓存命中率
+ignore_time_limit_when_active = true
+
+# 聊天流激活时间窗口(秒)。在此时间内认为聊天流是激活的，忽略时间限制
+active_time_window = 300
+
+# ConfigSection(title='人物信息缓存', description='缓存人物信息(昵称、备注等)。原理：按QQ号缓存，避免重复查询数据库。效果：减少约90%的人物信息查询', icon='👤', collapsed=True, order=4)
 
 [person_cache]
-max_size = 3000         # 缓存最大条目数
-ttl = 1800              # 缓存过期时间(秒) 30分钟
 
-# ============ 表达式缓存配置 ============
-# 双缓冲+缓慢加载+原子切换，避免CPU峰值
-# 2万条约需10秒加载完成 (batch_size=100, batch_delay=0.05)
+# 最大缓存条目数。每条约占用0.5-2KB内存，3000条约占用1.5-6MB。建议大于活跃用户数
+max_size = 3000
+
+# 缓存过期时间(秒)。人物信息变化慢，建议1800秒(30分钟)。过期后自动刷新
+ttl = 1800
+
+# ConfigSection(title='表达式缓存', description='全量缓存表达式数据。原理：双缓冲+缓慢加载+原子切换，避免CPU峰值。效果：启动后约10秒完成加载，后续查询直接从内存读取', icon='🎭', collapsed=True, order=4)
 
 [expression_cache]
-batch_size = 100        # 每批加载条数
-batch_delay = "0.1"      # 批次间延迟(秒)
-refresh_interval = 3600 # 自动刷新间隔(秒)，0表示不自动刷新
 
-# ============ 黑话缓存配置 ============
-# 双缓冲+缓慢加载+原子切换+内容索引，O(1)查找
-# 2万条约需10秒加载完成 (batch_size=100, batch_delay=0.05)
+# 每批加载的条数。默认100条，2万条约需10秒加载完成。增大此值可加快加载但会增加CPU峰值
+batch_size = 100
+
+# 批次间延迟(秒)。用于平滑加载避免CPU峰值，增大此值可降低CPU占用但延长加载时间
+# 可选值: 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0
+batch_delay = "0.05"
+
+# 自动刷新间隔(秒)。设置为0表示不自动刷新，仅启动时加载一次。建议3600秒(1小时)
+refresh_interval = 3600
+
+# ConfigSection(title='黑话缓存', description='全量缓存黑话/网络用语数据。原理：双缓冲+缓慢加载+原子切换，支持内容索引O(1)查找。效果：启动后约10秒完成加载，黑话匹配速度提升100倍以上', icon='🗣️', collapsed=True, order=5)
 
 [slang_cache]
-batch_size = 100        # 每批加载条数
-batch_delay = "0.1"      # 批次间延迟(秒)
-refresh_interval = 3600 # 自动刷新间隔(秒)，0表示不自动刷新
-enable_content_index = true  # 启用内容索引，O(1)查找速度
 
-# ============ 预加载配置 ============
-# 异步预加载聊天流数据，首次查询性能提升90%以上
+# 每批加载的条数。默认100条，2万条约需10秒加载完成。增大此值可加快加载但会增加CPU峰值
+batch_size = 100
 
-[preload]
-max_streams = 10        # 最多预加载的聊天流数量
-message_count = 50      # 每个聊天流预加载的消息数量
-max_persons_per_stream = 50  # 每个聊天流预加载的最大人物数量
-preload_delay = "0.1"   # 预加载延迟(秒)
+# 批次间延迟(秒)。用于平滑加载避免CPU峰值，增大此值可降低CPU占用但延长加载时间
+# 可选值: 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0
+batch_delay = "0.05"
+
+# 自动刷新间隔(秒)。设置为0表示不自动刷新，仅启动时加载一次。建议3600秒(1小时)
+refresh_interval = 3600
+
+# 启用内容索引。启用后可通过内容快速查找黑话，O(1)查找速度。会额外占用内存，每条约0.1KB
+enable_content_index = true
+
+# ConfigSection(title='知识库图谱缓存', description='全量缓存知识库图谱数据。原理：双缓冲+缓慢加载+原子切换，避免CPU峰值。效果：启动后约5-10秒完成加载，知识库查询速度提升80-90%，消除文件IO开销', icon='🧠', collapsed=True, order=6)
 
 [kg_cache]
+
+# 每批加载的条数。默认100条，2万条约需10秒加载完成。增大此值可加快加载但会增加CPU峰值
+batch_size = 100
+
+# 批次间延迟(秒)。用于平滑加载避免CPU峰值，增大此值可降低CPU占用但延长加载时间
+# 可选值: 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0
+batch_delay = "0.05"
+
+# 自动刷新间隔(秒)。设置为0表示不自动刷新，仅启动时加载一次。建议3600秒(1小时)
 refresh_interval = 3600
-batch_delay = "0.1"
+
+[message_cache_full]
+enable_lru_eviction = true
+max_chats = 306
+enable_incremental = true
+batch_delay = "0.05"
+refresh_interval = 0
+batch_size = 299
