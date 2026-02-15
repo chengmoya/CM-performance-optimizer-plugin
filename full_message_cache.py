@@ -202,6 +202,10 @@ class FullMessageCache:
         self._total_chats = 0
         self._stats_lock = threading.Lock()
 
+        # 刷新循环控制
+        self._running: bool = False
+        self._refresh_task: Optional[asyncio.Task] = None
+
         # 启动时立即开始加载
         try:
             asyncio.get_running_loop().create_task(self._load_to_buffer_b())
@@ -646,16 +650,19 @@ class FullMessageCache:
         try:
             from src.common import message_repository
 
-            # 查询该chat的所有消息
-            messages = message_repository.find_messages(
-                {"chat_id": chat_id},
-                sort=None,
-                limit=0,  # 不限制数量
-                limit_mode="latest",
-                filter_bot=False,
-                filter_command=False,
-                filter_intercept_message_level=None,
-            )
+            # 查询该chat的所有消息（通过 to_thread 避免阻塞事件循环）
+            def _sync_find() -> list:
+                return message_repository.find_messages(
+                    {"chat_id": chat_id},
+                    sort=None,
+                    limit=0,  # 不限制数量
+                    limit_mode="latest",
+                    filter_bot=False,
+                    filter_command=False,
+                    filter_intercept_message_level=None,
+                )
+
+            messages = await asyncio.to_thread(_sync_find)
 
             if not messages:
                 return
@@ -688,7 +695,11 @@ class FullMessageCache:
             logger.error(f"[FullCache] 增量加载异常 chat_id={chat_id}: {e}")
 
     async def _load_to_buffer_b(self):
-        """缓慢加载数据到缓冲区B"""
+        """缓慢加载数据到缓冲区B
+
+        所有同步 Peewee 数据库查询通过 asyncio.to_thread() 在独立线程中执行，
+        避免阻塞事件循环。
+        """
         async with self.load_lock:
             if self.loading:
                 return
@@ -697,54 +708,72 @@ class FullMessageCache:
         try:
             logger.info("[FullCache] 开始全量加载消息缓存到缓冲区B...")
 
-            # 清空缓冲区B
-            buffer_b_data = OrderedDict()
-            total_messages = 0
-            total_chats = 0
-
-            # 分批加载
-            offset = 0
             from src.common.database.database_model import Messages
             from src.common.data_models.database_data_model import DatabaseMessages
 
-            while True:
-                # 查询一批数据
-                batch = list(Messages.select().limit(self.batch_size).offset(offset))
-                if not batch:
-                    break
+            # 将全部同步数据库查询放入线程执行，避免阻塞事件循环
+            def _sync_load_all() -> tuple:
+                """在独立线程中执行所有同步数据库 I/O"""
+                buffer_b_data: OrderedDict = OrderedDict()
+                total_messages = 0
+                total_chats = 0
+                offset = 0
 
-                # 按chat_id分组
-                for msg in batch:
-                    chat_id = str(getattr(msg, "chat_id", ""))
-                    if not chat_id:
-                        continue
+                while True:
+                    # Peewee 同步查询 - 在线程中执行不会阻塞事件循环
+                    batch = list(
+                        Messages.select()
+                        .limit(self.batch_size)
+                        .offset(offset)
+                    )
+                    if not batch:
+                        break
 
-                    if chat_id not in buffer_b_data:
-                        buffer_b_data[chat_id] = {"messages": [], "ts": time.time()}
-                        total_chats += 1
+                    # 按 chat_id 分组
+                    for msg in batch:
+                        chat_id = str(getattr(msg, "chat_id", ""))
+                        if not chat_id:
+                            continue
 
-                    chat_data = buffer_b_data[chat_id]
-                    messages = chat_data["messages"]
+                        if chat_id not in buffer_b_data:
+                            buffer_b_data[chat_id] = {
+                                "messages": [],
+                                "ts": time.time(),
+                            }
+                            total_chats += 1
 
-                    # 限制单chat消息数
-                    if len(messages) < self.max_messages_per_chat:
-                        # 将 Messages 模型实例转换为 DatabaseMessages 对象
-                        db_msg = DatabaseMessages(**msg.__data__)
-                        messages.append(db_msg)
-                        total_messages += 1
+                        chat_data = buffer_b_data[chat_id]
+                        messages = chat_data["messages"]
 
-                # 记录进度
-                logger.debug(f"[FullCache] 加载进度: {total_messages} 条消息, {total_chats} 个聊天")
+                        # 限制单 chat 消息数
+                        if len(messages) < self.max_messages_per_chat:
+                            db_msg = DatabaseMessages(**msg.__data__)
+                            messages.append(db_msg)
+                            total_messages += 1
 
-                # 休眠，避免CPU峰值
-                await asyncio.sleep(self.batch_delay)
+                    logger.debug(
+                        f"[FullCache] 加载进度: {total_messages} 条消息, "
+                        f"{total_chats} 个聊天"
+                    )
 
-                offset += self.batch_size
+                    # 在线程中使用 time.sleep 进行批间延迟，不影响事件循环
+                    if self.batch_delay > 0:
+                        time.sleep(self.batch_delay)
 
-                # 检查总消息数上限
-                if total_messages >= self.max_total_messages:
-                    logger.warning(f"[FullCache] 达到总消息数上限 {self.max_total_messages}，停止加载")
-                    break
+                    offset += self.batch_size
+
+                    if total_messages >= self.max_total_messages:
+                        logger.warning(
+                            f"[FullCache] 达到总消息数上限 "
+                            f"{self.max_total_messages}，停止加载"
+                        )
+                        break
+
+                return buffer_b_data, total_messages, total_chats
+
+            buffer_b_data, total_messages, total_chats = await asyncio.to_thread(
+                _sync_load_all
+            )
 
             # 加载完成，原子切换
             with self.buffer_lock:
@@ -758,7 +787,10 @@ class FullMessageCache:
                     self._total_chats = total_chats
 
             self.last_refresh = time.time()
-            logger.info(f"[FullCache] 缓存加载完成并切换: {total_messages} 条消息, {total_chats} 个聊天")
+            logger.info(
+                f"[FullCache] 缓存加载完成并切换: "
+                f"{total_messages} 条消息, {total_chats} 个聊天"
+            )
 
         except Exception as e:
             logger.error(f"[FullCache] 缓存加载失败: {e}")
@@ -767,11 +799,51 @@ class FullMessageCache:
                 self.loading = False
 
     async def _refresh_loop(self):
-        """定期刷新循环"""
-        while True:
-            await asyncio.sleep(self.refresh_interval)
-            logger.info("[FullCache] 触发定期刷新...")
-            await self._load_to_buffer_b()
+        """定期刷新循环（可通过 stop() 优雅退出）"""
+        self._running = True
+        try:
+            while self._running:
+                # 使用短间隔轮询以便及时响应 stop()
+                elapsed = 0.0
+                while elapsed < self.refresh_interval and self._running:
+                    step = min(1.0, self.refresh_interval - elapsed)
+                    await asyncio.sleep(step)
+                    elapsed += step
+                if not self._running:
+                    break
+                logger.info("[FullCache] 触发定期刷新...")
+                await self._load_to_buffer_b()
+        except asyncio.CancelledError:
+            logger.info("[FullCache] 刷新循环已取消")
+        finally:
+            self._running = False
+
+    def start(self):
+        """启动定期刷新循环"""
+        if self._running:
+            return
+        if self.refresh_interval <= 0:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+            self._refresh_task = loop.create_task(self._refresh_loop())
+            logger.info(
+                f"[FullCache] 刷新循环已启动，间隔 {self.refresh_interval}s"
+            )
+        except RuntimeError:
+            logger.warning("[FullCache] 无法启动刷新循环：没有运行中的事件循环")
+
+    async def stop(self):
+        """停止刷新循环并清理任务"""
+        self._running = False
+        if self._refresh_task is not None:
+            self._refresh_task.cancel()
+            try:
+                await self._refresh_task
+            except asyncio.CancelledError:
+                pass
+            self._refresh_task = None
+        logger.info("[FullCache] 刷新循环已停止")
 
     def refresh(self):
         """手动刷新缓存"""
@@ -823,6 +895,9 @@ class FullMessageCacheModule:
         self._orig_store_message = None
         self._patched = False
         self._patched_store_message = False
+        self._alias_patches: List[Tuple[str, str, Any]] = []
+        self._patched_find_messages_func = None
+        self._patched_store_message_func = None
 
     def get_memory_usage(self) -> int:
         """获取模块内存占用（字节）"""
@@ -903,12 +978,31 @@ class FullMessageCacheModule:
                 module.stats.miss(time.time() - t0)
                 return result
 
+            # PatchChain 注册 find_messages（冲突检测 + 链式追踪）
+            _pc = None
+            try:
+                _cm = sys.modules.get("CM_perf_opt_core")
+                if _cm and hasattr(_cm, "get_patch_chain"):
+                    _pc = _cm.get_patch_chain()
+            except Exception:
+                pass
+            if _pc is not None:
+                _pc.register_patch(
+                    "find_messages", "full_message_cache",
+                    self._orig_find_messages, patched_find_messages,
+                )
+
             # 替换函数
             message_repository.find_messages = patched_find_messages
+            self._patched_find_messages_func = patched_find_messages
 
             # 替换已导入的引用
             for n, m in list(sys.modules.items()):
                 if m and getattr(m, "find_messages", None) is self._orig_find_messages:
+                    try:
+                        self._alias_patches.append((n, "find_messages", getattr(m, "find_messages", None)))
+                    except Exception:
+                        pass
                     setattr(m, "find_messages", patched_find_messages)
                     logger.debug(f"[FullCache] 替换 {n}.find_messages")
 
@@ -934,11 +1028,23 @@ class FullMessageCacheModule:
                                 # DB写入失败不影响缓存一致性
                                 logger.warning(f"[FullCache] DB写入失败，但缓存已更新: {e}")
 
+                    # PatchChain 注册 store_message
+                    if _pc is not None:
+                        _pc.register_patch(
+                            "store_message", "full_message_cache",
+                            orig_store_callable, patched_store_message,
+                        )
+
                     MessageStorage.store_message = staticmethod(patched_store_message)
+                    self._patched_store_message_func = patched_store_message
 
                     # 替换已导入的引用
                     for n, m in list(sys.modules.items()):
                         if m and getattr(m, "store_message", None) is orig_store_callable:
+                            try:
+                                self._alias_patches.append((n, "store_message", getattr(m, "store_message", None)))
+                            except Exception:
+                                pass
                             setattr(m, "store_message", patched_store_message)
                             logger.debug(f"[FullCache] 替换 {n}.store_message")
 
@@ -971,6 +1077,37 @@ class FullMessageCacheModule:
                     self._patched_store_message = False
             except Exception as e:
                 logger.warning(f"[FullCache] 回滚写入侧补丁失败: {e}")
+
+            # 回滚已导入的别名引用
+            try:
+                patched_find = self._patched_find_messages_func
+                patched_store = self._patched_store_message_func
+                for mod_name, attr, original in list(self._alias_patches):
+                    mod = sys.modules.get(mod_name)
+                    if not mod:
+                        continue
+                    try:
+                        cur = getattr(mod, attr, None)
+                        if attr == "find_messages" and patched_find is not None and cur is patched_find:
+                            setattr(mod, attr, original)
+                        elif attr == "store_message" and patched_store is not None and cur is patched_store:
+                            setattr(mod, attr, original)
+                    except Exception:
+                        continue
+            finally:
+                self._alias_patches.clear()
+                self._patched_find_messages_func = None
+                self._patched_store_message_func = None
+
+            # PatchChain 取消注册
+            try:
+                _cm = sys.modules.get("CM_perf_opt_core")
+                if _cm and hasattr(_cm, "get_patch_chain"):
+                    _pc = _cm.get_patch_chain()
+                    _pc.unregister_patch("find_messages", "full_message_cache")
+                    _pc.unregister_patch("store_message", "full_message_cache")
+            except Exception:
+                pass
 
             self._patched = False
             logger.info("[FullCache] 补丁已移除")

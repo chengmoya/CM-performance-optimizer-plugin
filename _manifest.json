@@ -1,100 +1,64 @@
 {
   "manifest_version": 1,
-  "name": "CM性能优化插件",
-  "version": "4.5.0",
-  "description": "通过缓存数据库查询结果来优化MaiBot性能。包含消息缓存（查询模式/全量模式）、消息热集、人物信息缓存、表达式缓存、黑话缓存、知识库图谱缓存六个模块，可减少95%以上的数据库查询，显著降低响应延迟",
+  "name": "CM-performance-optimizer",
+  "version": "5.0.0",
+  "description": "性能优化 - 消息缓存（查询模式/全量模式） + 消息热集 + 人物信息缓存 + 表达式缓存 + 黑话缓存 + 知识库图谱缓存",
   "author": {
-    "name": "城陌",
-    "url": "https://github.com/chengmoya"
+    "name": "城陌"
   },
-  "license": "GPL-3.0",
-  "host_application": {
-    "min_version": "0.12.2",
-    "max_version": "1.0.0"
-  },
-  "repository_url": "https://github.com/chengmoya/CM-performance-optimizer-plugin",
-  "keywords": [
-    "性能优化",
-    "缓存",
-    "数据库",
-    "消息缓存",
-    "人物缓存",
-    "表达式缓存",
-    "黑话缓存",
-    "performance",
-    "cache",
-    "optimization"
-  ],
-  "categories": [
-    "System",
-    "Performance"
-  ],
-  "tags": [
-    "性能",
-    "优化",
-    "缓存"
-  ],
+  "license": "MIT",
+  "main": "plugin.py",
   "dependencies": [],
   "python_dependencies": [
     {
-      "name": "pandas",
+      "package_name": "pandas",
       "version": ">=1.0.0",
       "optional": true,
       "description": "知识库图谱缓存所需（用于数据处理）"
     },
     {
-      "name": "pyarrow",
+      "package_name": "pyarrow",
       "version": ">=10.0.0",
       "optional": true,
       "description": "知识库图谱缓存所需（用于高效数据序列化）"
     },
     {
-      "name": "quick-algo",
+      "package_name": "quick_algo",
       "version": ">=0.1.0",
       "optional": true,
-      "description": "知识库图谱缓存所需（用于图数据处理）"
+      "description": "知识库图谱缓存所需（用于图数据处理）",
+      "install_name": "quick-algo"
+    },
+    {
+      "package_name": "rapidfuzz",
+      "version": ">=3.0.0",
+      "optional": true,
+      "description": "Levenshtein 距离加速模块（levenshtein_fast）可选依赖"
+    },
+    {
+      "package_name": "pyahocorasick",
+      "version": ">=2.0.0",
+      "optional": true,
+      "description": "黑话匹配自动机模块（jargon_matcher_automaton）可选依赖"
     }
   ],
-  "config_file": "config.toml",
-  "enabled": true,
-  "features": {
-    "message_cache": {
-      "enabled": true,
-      "description": "消息缓存 - 支持查询模式（命中率>95%）和全量模式（数据库镜像，100%命中率）"
-    },
-    "message_cache_hotset": {
-      "enabled": true,
-      "description": "消息热集 - 按 chat 缓存最近 N 条消息；首次访问后台预热，不阻塞；滑动窗口范围查询可优先命中热集"
-    },
-    "person_cache": {
-      "enabled": true,
-      "description": "人物信息缓存 - 缓存用户昵称等信息，命中率>90%"
-    },
-    "expression_cache": {
-      "enabled": false,
-      "description": "表达式缓存 - 双缓冲+缓慢加载+原子切换，全量缓存表达式数据"
-    },
-    "slang_cache": {
-      "enabled": false,
-      "description": "黑话缓存 - 双缓冲+缓慢加载+原子切换+内容索引，O(1)查找速度"
-    },
-    "kg_cache": {
-      "enabled": false,
-      "description": "知识库图谱缓存 - 双缓冲+缓慢加载+原子切换，全量缓存知识库图谱数据，查询速度提升80-90%"
-    },
-    "full_message_cache": {
-      "enabled": false,
-      "description": "全量消息缓存 - 数据库镜像模式，双缓冲+缓慢加载+原子切换+增量加载+LRU淘汰，100%命中率"
-    }
+  "id": "城陌.CM-performance-optimizer-plugin",
+  "host_application": {
+    "min_version": "0.7.0"
   },
-  "configuration": {
-    "modules": {
-      "message_cache_enabled": true,
-      "person_cache_enabled": true,
-      "expression_cache_enabled": false,
-      "slang_cache_enabled": false,
-      "kg_cache_enabled": false
-    }
-  },
-  "id": "chengmoya.CM-performance-optimizer"
+  "repository_url": "https://github.com/chengmoya/CM-performance-optimizer-plugin",
+  "keywords": [
+    "performance",
+    "cache",
+    "optimization",
+    "message-cache",
+    "knowledge-graph"
+  ],
+  "tags": [
+    "性能优化",
+    "缓存",
+    "消息缓存",
+    "知识图谱",
+    "表达式缓存"
+  ]
 }

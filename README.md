@@ -1,384 +1,180 @@
-# CM 性能优化插件
+# CM-performance-optimizer（性能优化插件）
 
-[![Version](https://img.shields.io/badge/version-4.5.0-blue.svg)]()
-[![License](https://img.shields.io/badge/license-GPL--3.0-green.svg)](LICENSE)
-[![MaiBot](https://img.shields.io/badge/MaiBot-0.12.2+-green.svg)]()
+[![Version](https://img.shields.io/badge/version-5.0.0-blue.svg)]()
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-MaiBot 回消息半天才出？切页卡成 PPT？插件多就卡崩？速速换上这个优化插件！
+CM-performance-optimizer 是一个面向 MaiBot 的性能优化插件。
 
-别让性能拖垮机器人体验，这款优化插件，让 MaiBot 从 "龟速" 变 "光速"
+- **缓存模块（5 个）**：通过 TTL 缓存 / 全量双缓冲缓存，减少数据库与文件 IO。
+- **系统性能优化模块（8 个）**：通过算法/查询/配置/运行时策略优化，降低关键路径开销。
 
-卡顿退散！延迟退散！冗余开销退散！MaiBot 性能插件，丝滑体验拉满!
+> 说明：本插件尽量做到“无硬依赖即可运行”，未安装可选依赖时会自动降级/禁用对应增强模块，并在日志中提示。
 
-多插件也能丝滑跑，消息秒回不等待，MaiBot 优化神器，用过就回不去!
+---
 
-通过缓存数据库查询结果来优化 MaiBot 性能，减少数据库 IO 开销。包含消息缓存（查询模式/全量模式）、人物信息缓存、表达式缓存、黑话缓存、知识库图谱缓存六个模块，可减少95%以上的数据库查询，显著降低响应延迟。
+## 功能模块列表（13 个）
 
-## 功能特性
+### 缓存模块（5 个）
 
-### 消息缓存（双模式）
+1. **message_cache**：消息查询缓存（TTL 缓存 `find_messages` 结果；可选使用 `orjson` 加速序列化）
+2. **person_cache**：人物信息缓存（缓存 Person 的 `load_from_database` 结果，减少重复查询）
+3. **expression_cache**：表达式全量缓存（双缓冲 + 原子切换；启动后后台加载）
+4. **jargon_cache**：黑话全量缓存（双缓冲 + 内容索引，加速匹配/查找）
+5. **kg_cache**：知识图谱全量缓存（双缓冲 + 文件哈希校验；可选依赖 `aiofiles/pandas/pyarrow/quick-algo`）
 
-#### 查询模式（默认）
-- **原理**: 拦截 `find_messages` 数据库查询，相同参数直接返回缓存结果
-- **效果**: 命中率通常 >95%，可节省约 95% 的消息查询时间
-- **适用场景**: 频繁查询相同聊天记录的场景
+### 系统性能优化模块（8 个）
 
-#### 全量模式（新增）
-- **原理**: 数据库镜像模式，全量加载所有消息到内存，拦截所有数据库查询
-- **效果**: 100% 命中率，完全消除数据库查询开销
-- **架构特点**:
-  - 双缓冲架构：buffer_a 当前使用，buffer_b 后台加载
-  - 缓慢加载：分批加载避免 CPU 峰值
-  - 原子切换：加载完成后瞬间切换，无服务中断
-  - 增量加载：缓存未命中时自动触发增量加载
-  - LRU 淘汰：内存不足时自动淘汰最少使用的聊天
-- **存储机制**: 同步写缓存 + 异步写数据库，新消息立即可查询
-- **适用场景**: 消息量适中（<10万条），追求极致性能的场景
-- **内存占用**: 约 1万条消息 50-150 MB
+6. **levenshtein_fast**：用 `rapidfuzz` 的 C 扩展替代纯 Python 编辑距离计算（可选）
+7. **image_desc_bulk_lookup**：图片描述替换改为批量 `WHERE IN` 查询，降低数据库往返
+8. **lightweight_profiler**：可开关的轻量 SQL 性能剖析器（纯观测层；可选 `psutil` 提供更丰富指标）
+9. **user_reference_batch_resolve**：@用户引用解析引入 TTL 缓存层，减少重复解析/查询
+10. **db_tuning**：SQLite 运行时参数调优（PRAGMA）+ 索引自检（可配置 mmap、checkpoint 周期）
+11. **message_repository_fastpath**：`count_messages` 快速路径（COUNT + 短 TTL 缓存）
+12. **jargon_matcher_automaton**：黑话匹配升级为 Aho-Corasick 自动机（可选 `pyahocorasick`）
+13. **asyncio_loop_pool**：线程本地事件循环池（避免频繁 `new_event_loop`；**高风险默认关闭**）
 
-### 人物信息缓存
-- **原理**: 拦截人物信息加载，按 QQ号 缓存昵称等信息
-- **效果**: 命中率通常 >90%，减少人物信息的重复查询
-- **适用场景**: 频繁获取人物信息的场景
-
-### 表达式缓存
-- **原理**: 双缓冲 + 缓慢加载 + 原子切换，全量缓存表达式数据
-- **效果**: 启动后约 10 秒完成加载，后续查询直接从内存读取
-- **适用场景**: 表达式学习、相似度匹配等场景
-- **内存占用**: 2 万条约 25-65 MB
-
-### 黑话缓存
-- **原理**: 双缓冲 + 缓慢加载 + 原子切换 + 内容索引，O(1) 查找
-- **效果**: 启动后约 10 秒完成加载，黑话匹配速度提升 100 倍以上
-- **适用场景**: 黑话解释、网络用语识别等场景
-- **内存占用**: 2 万条约 15-45 MB
-
-### 知识库图谱缓存
-- **原理**: 双缓冲 + 缓慢加载 + 原子切换，全量缓存知识库图谱数据
-- **效果**: 启动后约 5-10 秒完成加载，知识库查询速度提升 80-90%，消除文件 IO 开销
-- **适用场景**: LPMM 知识库查询、RAG 检索等场景
-- **内存占用**: 1000 实体 + 5000 段落约 1-10 MB
-
-## 性能指标
-
-| 指标 | 数值 |
-|------|------|
-| 基础内存占用 | 约 10-20 MB |
-| 消息缓存（查询模式） | 约 2-10 MB |
-| 消息缓存（全量模式，1万条） | 约 50-150 MB |
-| 表达式缓存 (2万条) | 约 25-65 MB |
-| 黑话缓存 (2万条) | 约 15-45 MB |
-| 知识库图谱缓存 | 约 1-10 MB |
-| CPU 开销 | 极低 (缓慢加载) |
-| 消息缓存命中率（查询模式） | >95% |
-| 消息缓存命中率（全量模式） | 100% |
-| 人物缓存命中率 | >90% |
-| 知识库图谱缓存命中率 | >85% |
-| 平均节省时间 | 40-50 ms/次查询 |
-| 表达式加载时间 | 约 10 秒 (2万条) |
-| 黑话加载时间 | 约 10 秒 (2万条) |
-| 知识库图谱加载时间 | 约 5-10 秒 |
-| 全量消息缓存加载时间 | 约 10-20 秒 (1万条) |
+---
 
 ## 安装
 
-将插件目录放入 `MaiBot/plugins/` 下，重启 MaiBot 即可。
+1. 将插件目录放入 `MaiBot/plugins/` 下：
 
-### 依赖
+   - `MaiBot/plugins/CM-performance-optimizer-plugin/`
 
-- **MaiBot**: 0.12.2+
-- **Python**: 3.9+
-- **额外依赖**:
-  - **必需依赖**: 无
-  - **可选依赖**（用于高级功能）:
-    - `pandas>=1.0.0` - 知识库图谱缓存所需（用于数据处理）
-    - `pyarrow>=10.0.0` - 知识库图谱缓存所需（用于高效数据序列化）
-    - `quick-algo>=0.1.0` - 知识库图谱缓存所需（用于图数据处理）
+2. 安装依赖（建议，尤其是离线测试/容器环境）：
 
-> **注意**: 如果未安装可选依赖，知识库图谱缓存功能将自动禁用，不影响其他功能使用。
+```bash
+pip install -r CM-performance-optimizer-plugin/requirements.txt
+```
+
+3. 重启 MaiBot。
+
+---
 
 ## 配置
 
-### WebUI 配置
+### 配置文件位置
 
-插件支持 WebUI 可视化配置，提供 9 个标签页：
+默认配置文件为 [`config.toml`](config.toml:1)。插件会在首次运行时生成/更新配置。
 
-1. **插件** - 基础设置、日志等级
-2. **模块开关** - 启用/禁用各缓存模块
-3. **消息缓存** - 缓存模式（查询/全量）、缓存大小、过期时间
-4. **消息热集** - 按 chat 缓存最近 N 条消息（后台预热，不阻塞首次访问）
-5. **全量消息缓存** - 批次大小、延迟、刷新间隔、增量加载、LRU淘汰
-6. **人物信息缓存** - 缓存大小、过期时间
-7. **表达式缓存** - 批次大小、延迟、刷新间隔
-8. **黑话缓存** - 批次大小、延迟、刷新间隔、内容索引
-9. **知识库图谱缓存** - 批次大小、延迟、刷新间隔
+### 常用配置示例
 
-### 配置文件
-
-配置文件位于 `config.toml`：
+> 该示例覆盖“模块开关 + 关键参数”。更细粒度配置会持续以 `config.toml` 的注释/默认值为准。
 
 ```toml
 [plugin]
-enabled = true          # 是否启用插件
-config_version = "4.5.0" # 配置结构版本号（用于自动迁移/生成默认配置）
-report_interval = 60    # 统计报告间隔(秒)，设置0可关闭
-log_level = "INFO"      # 日志等级: DEBUG/INFO/WARNING/ERROR
-memory_stats_enabled = true    # 是否启用内存统计功能
-memory_stats_cache_ttl = 60    # 内存统计结果缓存时间(秒)
+enabled = true
+log_level = "INFO"
+config_version = "2.0.0"  # 配置结构版本（用于自动迁移；不是插件版本）
 
-[modules]
-message_cache_enabled = true    # 消息缓存
-person_cache_enabled = true     # 人物信息缓存
-expression_cache_enabled = false # 表达式缓存
-slang_cache_enabled = false      # 黑话缓存
-kg_cache_enabled = false         # 知识库图谱缓存
+[performance]
+# 13 个模块开关（按需开关）
+enable_message_cache = true
+enable_person_cache = true
+enable_expression_cache = true
+enable_jargon_cache = true
+enable_kg_cache = false
 
-[message_cache]
-mode = "query"         # 缓存模式: "query"=查询模式, "full"=全量模式
-max_size = 2000         # 缓存最大条目数 (约2-10MB内存，仅查询模式有效)
-ttl = 120.0             # 缓存过期时间(秒，仅查询模式有效)
+enable_levenshtein_fast = true
+enable_image_desc_bulk_lookup = true
+enable_lightweight_profiler = false
+enable_user_reference_batch_resolve = true
+enable_message_repository_fastpath = true
+enable_db_tuning = true
+enable_jargon_matcher_automaton = true
+enable_asyncio_loop_pool = false
 
-[message_cache_hotset]
-enabled = true          # 是否启用消息热集缓存（后台预热，不阻塞首次访问）
-per_chat_limit = 200    # 每个 chat 缓存最近多少条
-ttl = 300               # 热集 TTL(秒)
-max_chats = 500         # 最多同时维护多少个 chat 的热集（LRU）
-bucket_enabled = false  # （默认关闭）end_time 分桶归一化，提升 query-cache 命中
-bucket_seconds = 5      # 分桶粒度(秒)
+# db_tuning 参数
+db_mmap_size = 268435456
+# db_wal_checkpoint_interval = 300
 
-[person_cache]
-max_size = 3000         # 缓存最大条目数 (约1.5-6MB内存)
-ttl = 1800              # 缓存过期时间(秒) 30分钟
+# profiler 参数（仅 enable_lightweight_profiler=true 时生效）
+# profiler_sample_rate = 0.1
 
-[expression_cache]
-batch_size = 100        # 每批加载条数
-batch_delay = 0.05      # 批次间延迟(秒)
-refresh_interval = 3600 # 自动刷新间隔(秒)，0=不自动刷新
+[advanced]
+# 可选：依赖 aiofiles/orjson 时更明显
+enable_async_io = true
+enable_orjson = true
+thread_pool_size = 4
+gc_interval = 300
 
-[slang_cache]
-batch_size = 100        # 每批加载条数
-batch_delay = 0.05      # 批次间延迟(秒)
-refresh_interval = 3600 # 自动刷新间隔(秒)，0=不自动刷新
-enable_content_index = true  # 启用内容索引，O(1)查找
+[monitoring]
+enable_stats = true
+stats_interval = 60
+enable_memory_monitor = true
+memory_warning_threshold = 0.8
+memory_critical_threshold = 0.9
 
-[kg_cache]
-batch_size = 100        # 每批加载条数
-batch_delay = 0.05      # 批次间延迟(秒)
-refresh_interval = 3600 # 自动刷新间隔(秒)，0=不自动刷新
+# 模块细节参数（使用 TOML 子表表达嵌套配置）
+[modules.message_cache]
+enabled = true
+per_chat_limit = 200
+ttl = 300
+max_chats = 500
+ignore_time_limit_when_active = true
+active_time_window = 300
 
-[full_message_cache]
-batch_size = 500        # 每批加载条数
-batch_delay = 0.05      # 批次间延迟(秒)
-refresh_interval = 0    # 自动刷新间隔(秒)，0=不自动刷新
-enable_incremental = true  # 启用增量加载（缓存未命中时自动加载）
-max_messages_per_chat = 10000  # 单个聊天最大消息数
-max_total_messages = 100000    # 总消息数上限
-enable_lru_eviction = true     # 启用LRU淘汰（内存不足时）
-max_chats = 1000               # 最大聊天数（LRU淘汰用）
+[modules.person_cache]
+max_size = 3000
+ttl = 1800
+warmup_enabled = true
+warmup_per_chat_sample = 30
+warmup_max_persons = 20
+warmup_ttl = 120
+
+[modules.expression_cache]
+refresh_interval = 3600
+
+[modules.jargon_cache]
+refresh_interval = 3600
+
+[modules.kg_cache]
+refresh_interval = 3600
 ```
 
-### 配置说明
+### 配置项说明（摘要）
 
-| 配置项 | 默认值 | 说明 |
-|--------|--------|------|
-| `plugin.enabled` | true | 是否启用插件 |
-| `plugin.config_version` | 4.5.0 | 配置结构版本号（用于自动迁移/生成默认配置） |
-| `plugin.report_interval` | 60 | 统计报告间隔(秒)，0=关闭 |
-| `plugin.log_level` | INFO | 日志等级 |
-| `message_cache.mode` | query | 缓存模式: query=查询模式, full=全量模式 |
-| `message_cache.max_size` | 2000 | 消息缓存条目数上限（仅查询模式有效） |
-| `message_cache.ttl` | 120 | 消息缓存过期时间(秒，仅查询模式有效） |
-| `message_cache_hotset.enabled` | true | 是否启用消息热集缓存（后台预热；预热完成后范围查询可直接命中热集） |
-| `message_cache_hotset.per_chat_limit` | 200 | 每个 chat 缓存最近多少条 |
-| `message_cache_hotset.ttl` | 300 | 热集 TTL(秒) |
-| `message_cache_hotset.max_chats` | 500 | 最多同时维护多少个 chat 的热集（LRU） |
-| `message_cache_hotset.bucket_enabled` | false | （默认关闭）end_time 分桶归一化，提升 query-cache 命中 |
-| `message_cache_hotset.bucket_seconds` | 5 | 分桶粒度(秒) |
-| `person_cache.max_size` | 3000 | 人物缓存条目数上限 |
-| `person_cache.ttl` | 1800 | 人物缓存过期时间(秒) |
-| `expression_cache.batch_size` | 100 | 每批加载条数，2万条约需10秒 |
-| `expression_cache.batch_delay` | 0.05 | 批次间延迟(秒)，用于平滑加载 |
-| `expression_cache.refresh_interval` | 3600 | 自动刷新间隔(秒)，0=不自动刷新 |
-| `slang_cache.batch_size` | 100 | 每批加载条数，2万条约需10秒 |
-| `slang_cache.batch_delay` | 0.05 | 批次间延迟(秒)，用于平滑加载 |
-| `slang_cache.refresh_interval` | 3600 | 自动刷新间隔(秒)，0=不自动刷新 |
-| `slang_cache.enable_content_index` | true | 启用内容索引，O(1)查找速度 |
-| `kg_cache.batch_size` | 100 | 每批加载条数 |
-| `kg_cache.batch_delay` | 0.05 | 批次间延迟(秒)，用于平滑加载 |
-| `kg_cache.refresh_interval` | 3600 | 自动刷新间隔(秒)，0=不自动刷新 |
-| `full_message_cache.batch_size` | 500 | 每批加载条数 |
-| `full_message_cache.batch_delay` | 0.05 | 批次间延迟(秒)，用于平滑加载 |
-| `full_message_cache.refresh_interval` | 0 | 自动刷新间隔(秒)，0=不自动刷新 |
-| `full_message_cache.enable_incremental` | true | 启用增量加载（缓存未命中时自动加载） |
-| `full_message_cache.max_messages_per_chat` | 10000 | 单个聊天最大消息数 |
-| `full_message_cache.max_total_messages` | 100000 | 总消息数上限 |
-| `full_message_cache.enable_lru_eviction` | true | 启用LRU淘汰（内存不足时） |
-| `full_message_cache.max_chats` | 1000 | 最大聊天数（LRU淘汰用） |
+- `plugin.enabled`：是否启用插件
+- `plugin.log_level`：日志级别
+- `performance.*`：13 个模块的开关与关键参数（例如 `db_mmap_size`）
+- `advanced.*`：异步 IO / JSON 加速与线程池等
+- `monitoring.*`：统计报告与内存监控
+- `modules.*`：各缓存模块的细粒度参数（见示例中的 `modules.message_cache` 等子表）
 
-## 统计报告
+---
 
-插件会定期输出统计报告 (默认60秒)，包含各模块的详细统计信息和内存占用情况：
+## 可选依赖说明
 
-```
-[PerfOpt] 📊 性能统计报告 | 运行时间: 0h42m56s
-================================================================================
-[PerfOpt] 📦 消息缓存(查询模式) | 缓存大小: 248/2000 | 内存: 3.45 MB
-[PerfOpt]   累计: 命中 151356 | 未命中 3446 | 命中率 97.8%
-[PerfOpt]   💡 节省约 6985.8s 数据库查询时间 (平均 46.2ms/次)
---------------------------------------------------------------------------------
-[PerfOpt] 📦 消息缓存(全量模式) | 状态: 已加载 | 大小: 8062条 | 内存: 125.34 MB
-[PerfOpt]   上次刷新: 5m20s前
-[PerfOpt]   自动刷新间隔: 0秒(不自动刷新)
-[PerfOpt]   累计: 命中 4523 | 未命中 0 | 命中率 100.0%
-[PerfOpt]   💡 节省约 208.1s 数据库查询时间 (平均 46.0ms/次)
---------------------------------------------------------------------------------
-[PerfOpt] 👤 人物缓存 | 缓存大小: 156/3000 | 内存: 0.82 MB
-[PerfOpt]   累计: 命中 8234 | 未命中 892 | 命中率 90.2%
---------------------------------------------------------------------------------
-[PerfOpt] 🎭 表达式缓存 | 状态: 已加载 | 大小: 21543 条 | 内存: 42.18 MB
-[PerfOpt]   上次刷新: 25m30s前
-[PerfOpt]   自动刷新间隔: 3600秒
---------------------------------------------------------------------------------
-[PerfOpt] 🗣️ 黑话缓存 | 状态: 已加载 | 大小: 18765 条 | 内存: 28.56 MB
-[PerfOpt]   上次刷新: 25m30s前
-[PerfOpt]   自动刷新间隔: 3600秒
---------------------------------------------------------------------------------
-[PerfOpt] 🧠 知识库图谱缓存 | 状态: 已加载 | 大小: 节点5234个, 边18765条, 实体1234个, 段落4000个 | 内存: 5.23 MB
-[PerfOpt]   上次刷新: 15m20s前
-[PerfOpt]   自动刷新间隔: 3600秒
-[PerfOpt]   累计: 命中 456 | 未命中 23 | 命中率 95.2%
-[PerfOpt]   💡 节省约 234.5s 文件加载时间 (平均 514.3ms/次)
---------------------------------------------------------------------------------
-[PerfOpt] 📊 总内存占用: 205.58 MB
-================================================================================
-```
+| 依赖 | 用途 | 影响模块 |
+|---|---|---|
+| `aiofiles>=0.8.0` | 异步文件读写 | `kg_cache` / 异步 IO 优化 |
+| `orjson>=3.8.0` | JSON 序列化加速 | `message_cache` 等缓存序列化路径 |
+| `psutil>=5.9.0` | 系统指标采集 | `lightweight_profiler` / `core.monitor` |
+| `rapidfuzz>=3.0.0` | C 扩展编辑距离 | `levenshtein_fast` |
+| `pyahocorasick>=2.0.0` | Aho-Corasick 自动机 | `jargon_matcher_automaton` |
+| `pandas>=1.0.0` | 数据处理 | `kg_cache` |
+| `pyarrow>=10.0.0` | 高效序列化/Parquet | `kg_cache` |
+| `quick-algo>=0.1.0` | 图算法 | `kg_cache` |
+| `tomli>=2.0.0` | Python<3.11 TOML 后备 | `core.config` |
+| `json-repair` | 修复极端 JSON 脏数据 | `expression_cache` |
 
-### 内存统计功能
+---
 
-**v4.3.0 新增功能**：插件现在可以显示每个模块的内存占用情况，帮助您更好地了解插件的资源使用情况。
+## 注意事项与兼容性
 
-#### 功能特点
-- **实时内存监控**：显示每个缓存模块的实际内存占用（精确到字节）
-- **性能优化**：使用缓存机制避免频繁测量，减少CPU开销
-- **可配置**：支持启用/禁用内存统计功能
-- **总内存汇总**：在报告末尾显示所有模块的总内存占用
+- **MaiBot 版本**：以 [`_manifest.json`](_manifest.json:1) 的 `host_application.min_version` 为准（当前为 `0.7.0`），建议使用 MaiBot 最新 main 分支。
+- **asyncio_loop_pool**：属于“运行时行为改变”类优化，可能影响与其他插件/线程模型的兼容性，默认关闭。
+- **可选依赖缺失**：不会阻止插件加载，但对应增强模块会降级/禁用。
 
-#### 配置选项
+---
 
-在 `config.toml` 中配置内存统计功能：
+## 版本
 
-```toml
-[plugin]
-memory_stats_enabled = true    # 是否启用内存统计功能（默认: true）
-memory_stats_cache_ttl = 60    # 内存统计结果缓存时间(秒)（默认: 60）
-```
+- 插件版本：`5.0.0`
+- 版本来源：以 [`_manifest.json`](_manifest.json:1) 的 `version` 字段为准，并在代码与文档中保持一致。
 
-#### WebUI 配置
-
-在 WebUI 的"插件"标签页中可以配置：
-
-- **内存统计**：启用/禁用内存统计功能
-- **内存统计缓存时间**：设置内存测量结果的缓存时间，避免频繁测量影响性能
-
-#### 性能影响
-
-内存测量操作本身会消耗一定的 CPU 资源：
-
-| 模块 | 测量耗时 | 说明 |
-|------|----------|------|
-| 消息缓存 (2000条) | ~5-15ms | 递归遍历 OrderedDict 和 dict |
-| 表达式缓存 (2万条) | ~50-150ms | 递归遍历大型列表 |
-| 黑话缓存 (2万条) | ~50-150ms | 递归遍历列表 + 索引字典 |
-| 知识库图谱缓存 | ~30-100ms | 递归遍历图对象 |
-| **总测量时间** | **~135-415ms** | 所有模块测量时间总和 |
-
-**优化建议**：
-- 默认每 60 秒测量一次，平均 CPU 占用 < 0.01%
-- 可通过 `memory_stats_cache_ttl` 调整测量频率（建议 60-300 秒）
-- 在性能敏感场景可禁用此功能（设置 `memory_stats_enabled = false`）
-
-#### 内存占用估算
-
-根据实际测量数据，各模块的内存占用估算如下：
-
-| 模块 | 数据量 | 预估内存占用 | 说明 |
-|------|--------|--------------|------|
-| 消息缓存（查询模式） | 2000条 | 2-10 MB | 每条消息 1-5KB |
-| 消息缓存（全量模式） | 1万条 | 50-150 MB | 每条消息 5-15KB |
-| 人物缓存 | 3000条 | 1.5-6 MB | 每个人物 0.5-2KB |
-| 表达式缓存 | 2万条 | 25-65 MB | 包含表达式内容和元数据 |
-| 黑话缓存 | 2万条 | 15-45 MB | 包含黑话内容和索引 |
-| 知识库图谱缓存 | 5000节点 | 1-10 MB | 包含图结构、节点、边等 |
-| **总计（查询模式）** | - | **45-136 MB** | 根据启用的模块不同而变化 |
-| **总计（全量模式）** | - | **95-250 MB** | 包含全量消息缓存 |
-
-## 故障排除
-
-### 插件无法加载
-1. 检查 `_manifest.json` 文件是否存在且格式正确
-2. 检查 Python 版本 >= 3.9
-3. 查看 MaiBot 日志中的错误信息
-
-### 日志等级修改无效
-日志等级需要重启 MaiBot 后生效。
-
-### 缓存命中率低
-1. 检查 TTL 设置是否过短
-2. 检查 max_size 是否过小
-
-## 更新日志
-
-### v4.5.0
-- **新增全量消息缓存模式**（数据库镜像模式）
-  - 双缓冲架构：buffer_a 当前使用，buffer_b 后台加载
-  - 缓慢加载：分批加载避免 CPU 峰值
-  - 原子切换：加载完成后瞬间切换，无服务中断
-  - 增量加载：缓存未命中时自动触发增量加载
-  - LRU 淘汰：内存不足时自动淘汰最少使用的聊天
-  - 同步写缓存 + 异步写数据库，新消息立即可查询
-  - 100% 命中率，完全消除数据库查询开销
-- 消息缓存支持双模式切换：查询模式 / 全量模式
-- 新增全量消息缓存配置选项
-- 新增全量消息缓存统计报告
-- 修复统计报告显示问题（添加代理属性）
-
-### v4.3.1
-- 统一版本号，修复版本号不一致问题
-- 优化代码结构和文档
-- 准备发布到 GitHub
-
-### v4.2.0
-- 新增知识库图谱缓存模块（双缓冲 + 缓慢加载 + 原子切换）
-- 知识库查询速度提升 80-90%，消除文件 IO 开销
-- 添加知识库图谱缓存统计报告
-- 新增 WebUI 配置标签页（知识库图谱缓存）
-- 插件版本更新至 v4.2.0
-
-### v4.1.0
-- 修复表达式缓存拦截方法引用bug
-- 修复黑话缓存拦截方法引用bug
-- 优化统计报告日志格式，避免对齐问题
-- 小数配置项改为下拉框选择（batch_delay）
-- 添加表达式和黑话缓存的命中统计
-- 添加节省时间统计
-
-### v4.0.0
-- 新增表达式缓存模块（双缓冲 + 缓慢加载 + 原子切换）
-- 新增黑话缓存模块（双缓冲 + 缓慢加载 + 原子切换 + 内容索引）
-- 支持全量缓存预热，启动后约 10 秒完成加载
-- 支持自动刷新和手动刷新
-- 添加 2 个新的 WebUI 配置标签页
-
-### v3.0.0
-- 整合人物信息缓存功能
-- 添加模块化配置
-- 添加 WebUI 标签页布局
-- 添加日志等级配置
-
-### v2.x
-- 消息缓存功能
-- 定时统计报告
+---
 
 ## 许可证
 
-GPL-3.0
+MIT License，见 [`LICENSE`](LICENSE:1)。

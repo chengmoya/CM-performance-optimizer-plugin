@@ -1,0 +1,59 @@
+# -*- coding: utf-8 -*-
+# CM-performance-optimizer-plugin/requirements.txt
+#
+# 使用说明（中文）：
+# 1) 本文件用于列出本插件“可能需要”的第三方 Python 依赖。
+# 2) MaiBot 通常在自身运行环境中已自带部分依赖（例如 peewee）。这里仍然列出，便于离线测试/CI/容器化部署。
+# 3) 标注为“可选”的依赖：未安装时插件仍可加载，但对应模块会自动降级/禁用（或启用失败后记录日志）。
+# 4) 安装方式：
+#    pip install -r CM-performance-optimizer-plugin/requirements.txt
+#
+
+# ----------------------
+# 必需依赖（运行基础）
+# ----------------------
+# peewee - MaiBot 使用的数据库 ORM（MaiBot 通常自带，但建议显式列出）
+peewee
+
+
+# ----------------------
+# 可选依赖（性能/功能增强）
+# ----------------------
+# aiofiles - 异步文件 I/O（kg_cache 使用；也用于异步写入优化）
+aiofiles>=0.8.0
+
+# orjson - 高性能 JSON 序列化/反序列化（message_cache 等模块可用）
+orjson>=3.8.0
+
+# psutil - 系统资源监控（lightweight_profiler / core.monitor 可用）
+psutil>=5.9.0
+
+# rapidfuzz - C 扩展字符串相似度/编辑距离（levenshtein_fast 模块）
+rapidfuzz>=3.0.0
+
+# pyahocorasick - Aho-Corasick 自动机（jargon_matcher_automaton 模块）
+# 注意：导入名为 "ahocorasick"，pip 包名为 "pyahocorasick"
+pyahocorasick>=2.0.0
+
+
+# ----------------------
+# 可选依赖（kg_cache：知识库图谱缓存）
+# ----------------------
+# pandas - 数据处理（kg_cache 可选）
+pandas>=1.0.0
+
+# pyarrow - 高效序列化/Parquet 支持（kg_cache 可选）
+pyarrow>=10.0.0
+
+# quick-algo - 图算法库（kg_cache 可选；导入名 quick_algo）
+quick-algo>=0.1.0
+
+
+# ----------------------
+# 可选依赖（配置/数据修复辅助）
+# ----------------------
+# tomli - Python < 3.11 的 TOML 解析后备（如果运行环境没有 tomllib）
+tomli>=2.0.0; python_version < "3.11"
+
+# json-repair - JSON 修复工具（expression_cache 在极端场景下用于修复历史脏数据）
+json-repair>=0.7.0
