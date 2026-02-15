@@ -44,7 +44,7 @@
   ],
   "id": "城陌.CM-performance-optimizer-plugin",
   "host_application": {
-    "min_version": "0.11.6"
+    "min_version": "0.12.0"
   },
   "repository_url": "https://github.com/chengmoya/CM-performance-optimizer-plugin",
   "keywords": [
