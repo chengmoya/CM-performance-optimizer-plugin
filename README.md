@@ -162,7 +162,7 @@ refresh_interval = 3600
 
 ## 注意事项与兼容性
 
-- **MaiBot 版本**：以 [`_manifest.json`](_manifest.json:1) 的 `host_application.min_version` 为准（当前为 `0.7.0`），建议使用 MaiBot 最新 main 分支。
+- **MaiBot 版本**：以 [`_manifest.json`](_manifest.json:1) 的 `host_application.min_version` 为准（当前为 `0.12.0`），建议使用 MaiBot 最新 main 分支。
 - **asyncio_loop_pool**：属于“运行时行为改变”类优化，可能影响与其他插件/线程模型的兼容性，默认关闭。
 - **可选依赖缺失**：不会阻止插件加载，但对应增强模块会降级/禁用。
 
