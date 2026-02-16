@@ -1302,7 +1302,7 @@ class CMPerformanceOptimizerPlugin(BasePlugin):
                 type=bool, default=True, description="是否启用插件"
             ),
             "config_version": ConfigField(
-                type=str, default="2.0.0", description="配置文件版本"
+                type=str, default="5.2.0", description="配置文件版本"
             ),
             "log_level": ConfigField(
                 type=str, default="INFO", description="日志级别"

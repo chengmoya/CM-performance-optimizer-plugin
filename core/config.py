@@ -535,7 +535,7 @@ class ConfigManager:
             ),
             "config_version": ExtendedConfigField(
                 field_type=ConfigFieldType.STR,
-                default="2.0.0",
+                default="5.2.0",
                 description="配置文件版本",
                 section="plugin",
                 order=1,

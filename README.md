@@ -134,7 +134,7 @@ CM-performance-optimizer 是一个面向 MaiBot 的全栈性能优化插件，�
 | 配置项 | 类型 | 默认值 | 说明 |
 |-------|------|-------|------|
 | `enabled` | boolean | `true` | 是否启用插件 |
-| `config_version` | string | `"2.0.0"` | 配置文件版本（用于配置迁移，请勿手动修改） |
+| `config_version` | string | `"5.2.0"` | 配置文件版本（用于配置迁移，请勿手动修改） |
 | `log_level` | string | `"INFO"` | 日志级别，可选值：`DEBUG`、`INFO`、`WARNING`、`ERROR`、`CRITICAL` |
 
 ### 功能模块开关
