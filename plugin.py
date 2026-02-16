@@ -35,7 +35,10 @@ import importlib.util
 from pathlib import Path
 from typing import Optional, Dict, Any, Tuple, List, Union
 
-# 统一版本管理
+# 统一版本管理 - 确保插件目录在 sys.path 中
+_plugin_dir = Path(__file__).parent
+if str(_plugin_dir) not in sys.path:
+    sys.path.insert(0, str(_plugin_dir))
 from version import PLUGIN_VERSION, CONFIG_VERSION, MAIBOT_MIN_VERSION
 
 # 异步优化相关导入
