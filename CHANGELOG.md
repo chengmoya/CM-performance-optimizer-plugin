@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.2.0] - 2026-02-16
+
+### Changed
+- 统一版本号到 5.2.0（包括配置系统版本号）
+
+## [5.1.0] - 2026-02-15
+
+### Changed
+- 统一版本号到 5.1.0
+- 清理遗留注释和调试代码
+- 优化代码结构和可读性
+- 完善类型注解和文档
+
 ## [5.0.0] - 2026-02-15
 
 ### Added

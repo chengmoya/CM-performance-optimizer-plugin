@@ -1,5 +1,5 @@
 """
-CM 性能优化插件 v5.0.0
+CM 性能优化插件 v5.2.0
 
 功能模块：
 1. 消息缓存 (message_cache) - 缓存 find_messages 查询结果
@@ -107,7 +107,7 @@ except ImportError:
 logger = get_logger("CM_perf_opt")
 
 PLUGIN_NAME = "CM-performance-optimizer"
-PLUGIN_VERSION = "5.0.0"
+PLUGIN_VERSION = "5.2.0"
 
 # 全局变量，用于存储动态加载的模块
 _global_modules: Dict[str, Any] = {}
@@ -229,7 +229,7 @@ def _try_early_preload_kg_cache() -> None:
                 if isinstance(cfg, dict):
                     if cfg.get("plugin", {}).get("enabled") is False:
                         allow = False
-                    if cfg.get("performance", {}).get("enable_kg_cache") is False:
+                    if cfg.get("modules", {}).get("kg_cache_enabled") is False:
                         allow = False
         except Exception:
             # 解析失败时保持 allow=True（以便尽量提前预热）
@@ -426,57 +426,57 @@ class _PerformanceOptimizer:
  
             if self._config_manager:
                 enable_lightweight_profiler = self._config_manager.get(
-                    "performance.enable_lightweight_profiler", False
+                    "modules.lightweight_profiler_enabled", False
                 )
                 profiler_sample_rate = float(
-                    self._config_manager.get("performance.profiler_sample_rate", 0.1)
+                    self._config_manager.get("modules.lightweight_profiler.sample_rate", 0.1)
                 )
  
                 enable_message_cache = self._config_manager.get(
-                    "performance.enable_message_cache", True
+                    "modules.message_cache_enabled", True
                 )
                 enable_message_repository_fastpath = self._config_manager.get(
-                    "performance.enable_message_repository_fastpath", True
+                    "modules.message_repository_fastpath_enabled", True
                 )
                 enable_person_cache = self._config_manager.get(
-                    "performance.enable_person_cache", True
+                    "modules.person_cache_enabled", True
                 )
                 enable_regex_precompile = self._config_manager.get(
-                    "performance.enable_regex_precompile", True
+                    "modules.regex_precompile_enabled", True
                 )
                 enable_typo_generator_cache = self._config_manager.get(
-                    "performance.enable_typo_generator_cache", True
+                    "modules.typo_generator_cache_enabled", True
                 )
                 enable_user_reference_batch_resolve = self._config_manager.get(
-                    "performance.enable_user_reference_batch_resolve", True
+                    "modules.user_reference_batch_resolve_enabled", True
                 )
                 enable_expression_cache = self._config_manager.get(
-                    "performance.enable_expression_cache", True
+                    "modules.expression_cache_enabled", True
                 )
                 enable_jargon_cache = self._config_manager.get(
-                    "performance.enable_jargon_cache", True
+                    "modules.jargon_cache_enabled", True
                 )
                 enable_jargon_matcher_automaton = self._config_manager.get(
-                    "performance.enable_jargon_matcher_automaton", True
+                    "modules.jargon_matcher_automaton_enabled", True
                 )
                 enable_kg_cache = self._config_manager.get(
-                    "performance.enable_kg_cache", True
+                    "modules.kg_cache_enabled", True
                 )
                 enable_levenshtein_fast = self._config_manager.get(
-                    "performance.enable_levenshtein_fast", True
+                    "modules.levenshtein_fast_enabled", True
                 )
                 enable_image_desc_bulk_lookup = self._config_manager.get(
-                    "performance.enable_image_desc_bulk_lookup", True
+                    "modules.image_desc_bulk_lookup_enabled", True
                 )
                 enable_db_tuning = self._config_manager.get(
-                    "performance.enable_db_tuning", True
+                    "modules.db_tuning_enabled", True
                 )
                 enable_asyncio_loop_pool = self._config_manager.get(
-                    "performance.enable_asyncio_loop_pool", True
+                    "modules.asyncio_loop_pool_enabled", True
                 )
-                db_mmap_size = int(self._config_manager.get("performance.db_mmap_size", 268435456))
+                db_mmap_size = int(self._config_manager.get("modules.db_tuning.mmap_size", 268435456))
                 db_wal_checkpoint_interval = int(
-                    self._config_manager.get("performance.db_wal_checkpoint_interval", 300)
+                    self._config_manager.get("modules.db_tuning.wal_checkpoint_interval", 300)
                 )
 
             # 动态加载并应用各个缓存模块
@@ -545,7 +545,7 @@ class _PerformanceOptimizer:
                 except Exception as e:
                     self.logger.error(f"[PerfOpt] 消息缓存补丁失败: {e}")
             else:
-                self.logger.info("[PerfOpt] 消息缓��已禁用")
+                self.logger.info("[PerfOpt] 消息缓存已禁用")
 
             # message_repository count 快速路径（仅 patch count_messages）
             if enable_message_repository_fastpath:
@@ -801,7 +801,7 @@ class _PerformanceOptimizer:
                     pass
 
             self.patches_applied = True
-            self.logger.info("[PerfOpt] ✓ 所有性能���化补丁应用完成")
+            self.logger.info("[PerfOpt] ✓ 所有性能优化补丁应用完成")
 
         except Exception as e:
             self.logger.error(f"[PerfOpt] 补丁应用失败: {e}")
@@ -893,6 +893,16 @@ class _PerformanceOptimizer:
             # 停止所有缓存
             self.cache_manager.stop_all()
 
+            # BUG FIX: 统一回滚所有模块的 monkey-patch
+            # 遍历所有缓存模块，调用 remove_patch() 方法
+            for name, cache in list(self.cache_manager.caches.items()):
+                try:
+                    if hasattr(cache, "remove_patch") and callable(getattr(cache, "remove_patch")):
+                        cache.remove_patch()
+                        self.logger.debug(f"[PerfOpt] 已回滚 {name} 的补丁")
+                except Exception as e:
+                    self.logger.warning(f"[PerfOpt] 回滚 {name} 补丁失败: {e}")
+
             # 清除所有缓存
             self.cache_manager.clear_all()
 
@@ -919,7 +929,7 @@ class _PerformanceOptimizer:
         return {}
 
     def get_memory_usage(self) -> Dict[str, int]:
-        """获取内存���用信息"""
+        """获取内存使用信息"""
         return self.cache_manager.get_memory_usage()
 
 
@@ -962,7 +972,7 @@ class CMPerformanceOptimizerPlugin(BasePlugin):
     dependencies: List[str] = []  # type: ignore[assignment]
     config_file_name: str = "config.toml"  # type: ignore[assignment]
 
-    # 配置节描述 - 4个标签页
+    # 配置节描述 - 每个模块独立section
     config_section_descriptions = {  # type: ignore[assignment]
         "plugin": ConfigSection(
             title="插件设置",
@@ -971,33 +981,75 @@ class CMPerformanceOptimizerPlugin(BasePlugin):
             collapsed=False,
             order=0,
         ),
-        "performance": ConfigSection(
-            title="性能优化模块",
+        "modules": ConfigSection(
+            title="功能模块开关",
             description="选择要启用的性能优化功能模块",
             icon="⚡",
             collapsed=False,
             order=1,
         ),
-        "modules": ConfigSection(
-            title="模块配置",
-            description="配置各缓存模块的详细参数",
-            icon="💾",
+        "message_cache": ConfigSection(
+            title="消息缓存配置",
+            description="消息热集缓存，加速消息查询",
+            icon="💬",
             collapsed=True,
             order=2,
+        ),
+        "person_cache": ConfigSection(
+            title="人物缓存配置",
+            description="人物信息缓存，减少数据库查询",
+            icon="👤",
+            collapsed=True,
+            order=3,
+        ),
+        "expression_cache": ConfigSection(
+            title="表达式缓存配置",
+            description="表达式缓存，加速表达式匹配",
+            icon="📝",
+            collapsed=True,
+            order=4,
+        ),
+        "jargon_cache": ConfigSection(
+            title="黑话缓存配置",
+            description="黑话缓存，加速黑话解析",
+            icon="📖",
+            collapsed=True,
+            order=5,
+        ),
+        "kg_cache": ConfigSection(
+            title="知识图谱缓存配置",
+            description="知识图谱缓存，加速知识检索",
+            icon="🧠",
+            collapsed=True,
+            order=6,
+        ),
+        "db_tuning": ConfigSection(
+            title="数据库调优配置",
+            description="SQLite数据库性能优化参数",
+            icon="🗄️",
+            collapsed=True,
+            order=7,
+        ),
+        "lightweight_profiler": ConfigSection(
+            title="性能剖析配置",
+            description="轻量性能剖析器设置",
+            icon="🔬",
+            collapsed=True,
+            order=8,
         ),
         "advanced": ConfigSection(
             title="高级设置",
             description="异步IO、JSON加速等高级选项",
             icon="⚙️",
             collapsed=True,
-            order=3,
+            order=9,
         ),
         "monitoring": ConfigSection(
             title="监控设置",
             description="统计报告和内存监控配置",
             icon="📊",
             collapsed=True,
-            order=4,
+            order=10,
         ),
     }
 
@@ -1009,26 +1061,83 @@ class CMPerformanceOptimizerPlugin(BasePlugin):
                 id="plugin",
                 title="插件",
                 icon="🔧",
-                sections=["plugin", "performance"],
+                sections=["plugin"],
                 order=0,
             ),
             ConfigTab(
-                id="cache", title="缓存", icon="💾", sections=["modules"], order=1
+                id="modules",
+                title="模块开关",
+                icon="⚡",
+                sections=["modules"],
+                order=1,
             ),
             ConfigTab(
-                id="advanced", title="高级", icon="⚙️", sections=["advanced"], order=2
+                id="message_cache",
+                title="消息缓存",
+                icon="💬",
+                sections=["message_cache"],
+                order=2,
+            ),
+            ConfigTab(
+                id="person_cache",
+                title="人物缓存",
+                icon="👤",
+                sections=["person_cache"],
+                order=3,
+            ),
+            ConfigTab(
+                id="expression_cache",
+                title="表达式缓存",
+                icon="📝",
+                sections=["expression_cache"],
+                order=4,
+            ),
+            ConfigTab(
+                id="jargon_cache",
+                title="黑话缓存",
+                icon="📖",
+                sections=["jargon_cache"],
+                order=5,
+            ),
+            ConfigTab(
+                id="kg_cache",
+                title="知识图谱缓存",
+                icon="🧠",
+                sections=["kg_cache"],
+                order=6,
+            ),
+            ConfigTab(
+                id="db_tuning",
+                title="数据库调优",
+                icon="🗄️",
+                sections=["db_tuning"],
+                order=7,
+            ),
+            ConfigTab(
+                id="lightweight_profiler",
+                title="性能剖析",
+                icon="🔬",
+                sections=["lightweight_profiler"],
+                order=8,
+            ),
+            ConfigTab(
+                id="advanced",
+                title="高级",
+                icon="⚙️",
+                sections=["advanced"],
+                order=9,
             ),
             ConfigTab(
                 id="monitoring",
                 title="监控",
                 icon="📊",
                 sections=["monitoring"],
-                order=3,
+                order=10,
             ),
         ],
     )
 
-    # 配置Schema定义 - 完整版
+    # 配置Schema定义 - 与config.toml结构匹配
     config_schema = {  # type: ignore[assignment]
         "plugin": {
             "enabled": ConfigField(
@@ -1041,141 +1150,241 @@ class CMPerformanceOptimizerPlugin(BasePlugin):
                 type=str, default="INFO", description="日志级别"
             ),
         },
-        "performance": {
-            "enable_message_cache": ConfigField(
+        "modules": {
+            "message_cache_enabled": ConfigField(
                 type=bool, default=True, description="是否启用消息缓存"
             ),
-            "enable_message_repository_fastpath": ConfigField(
+            "message_repository_fastpath_enabled": ConfigField(
                 type=bool,
                 default=True,
-                description="是否启用 message_repository.count_messages 快速路径（短期 count 缓存 + COUNT 查询）",
+                description="是否启用消息仓库快速路径",
             ),
-            "enable_person_cache": ConfigField(
-                type=bool, default=True, description="是否启用人格信息缓存"
+            "person_cache_enabled": ConfigField(
+                type=bool, default=True, description="是否启用人物信息缓存"
             ),
-            "enable_expression_cache": ConfigField(
-                type=bool, default=True, description="是否启用表情缓存"
+            "expression_cache_enabled": ConfigField(
+                type=bool, default=True, description="是否启用表达式缓存"
             ),
-            "enable_jargon_cache": ConfigField(
+            "jargon_cache_enabled": ConfigField(
                 type=bool, default=True, description="是否启用黑话缓存"
             ),
-            "enable_jargon_matcher_automaton": ConfigField(
+            "jargon_matcher_automaton_enabled": ConfigField(
                 type=bool,
                 default=True,
-                description="是否启用黑话匹配自动机加速（Aho-Corasick）",
+                description="是否启用黑话匹配自动机加速",
             ),
-            "enable_kg_cache": ConfigField(
+            "kg_cache_enabled": ConfigField(
                 type=bool, default=True, description="是否启用知识图谱缓存"
             ),
-            "enable_db_tuning": ConfigField(
+            "levenshtein_fast_enabled": ConfigField(
+                type=bool, default=True, description="是否启用Levenshtein距离加速"
+            ),
+            "image_desc_bulk_lookup_enabled": ConfigField(
+                type=bool, default=True, description="是否启用图片描述批量替换"
+            ),
+            "user_reference_batch_resolve_enabled": ConfigField(
+                type=bool, default=True, description="是否启用用户引用批量解析"
+            ),
+            "regex_precompile_enabled": ConfigField(
+                type=bool, default=True, description="是否启用正则预编译"
+            ),
+            "typo_generator_cache_enabled": ConfigField(
+                type=bool, default=True, description="是否启用typo_generator缓存"
+            ),
+            "db_tuning_enabled": ConfigField(
                 type=bool,
                 default=True,
-                description="是否启用 SQLite 数据库调优（PRAGMA + 索引自检）",
+                description="是否启用SQLite数据库调优",
             ),
-            "db_mmap_size": ConfigField(
+            "lightweight_profiler_enabled": ConfigField(
+                type=bool, default=False, description="是否启用轻量性能剖析"
+            ),
+            "asyncio_loop_pool_enabled": ConfigField(
+                type=bool, default=True, description="是否启用asyncio_loop_pool"
+            ),
+        },
+        "message_cache": {
+            "per_chat_limit": ConfigField(
+                type=int, default=200, description="每个聊天的缓存消息数量 (50-1000)"
+            ),
+            "ttl": ConfigField(
+                type=int, default=300, description="缓存过期时间(秒) (60-3600)"
+            ),
+            "max_chats": ConfigField(
+                type=int, default=500, description="最大缓存聊天数 (100-2000)"
+            ),
+            "mode": ConfigField(
+                type=str, default="query", description="缓存模式: query或full"
+            ),
+            "ignore_time_limit_when_active": ConfigField(
+                type=bool, default=True, description="活跃聊天流是否忽略TTL限制"
+            ),
+            "active_time_window": ConfigField(
+                type=int, default=300, description="活跃时间窗口(秒) (60-1800)"
+            ),
+            "bucket_enabled": ConfigField(
+                type=bool, default=False, description="滑动窗口分桶功能(预留)"
+            ),
+            "bucket_seconds": ConfigField(
+                type=int, default=5, description="分桶时间间隔(秒)"
+            ),
+        },
+        "person_cache": {
+            "max_size": ConfigField(
+                type=int, default=3000, description="最大缓存条目数 (500-10000)"
+            ),
+            "ttl": ConfigField(
+                type=int, default=1800, description="缓存过期时间(秒) (300-7200)"
+            ),
+            "warmup_enabled": ConfigField(
+                type=bool, default=True, description="是否启用预热功能"
+            ),
+            "warmup_per_chat_sample": ConfigField(
+                type=int, default=30, description="预热时每聊天采样消息数 (10-100)"
+            ),
+            "warmup_max_persons": ConfigField(
+                type=int, default=20, description="每聊天最多预热人数 (5-50)"
+            ),
+            "warmup_ttl": ConfigField(
+                type=int, default=120, description="预热记录过期时间(秒) (60-300)"
+            ),
+            "warmup_debounce_seconds": ConfigField(
+                type=float, default=3.0, description="预热防抖时间(秒) (1.0-10.0)"
+            ),
+        },
+        "expression_cache": {
+            "batch_size": ConfigField(
+                type=int, default=100, description="批量处理大小 (10-500)"
+            ),
+            "batch_delay": ConfigField(
+                type=float, default=0.05, description="批量处理延迟(秒) (0.01-1.0)"
+            ),
+            "refresh_interval": ConfigField(
+                type=int, default=3600, description="刷新间隔(秒) (600-86400)"
+            ),
+            "incremental_refresh_interval": ConfigField(
+                type=int, default=600, description="增量刷新间隔(秒) (60-3600)"
+            ),
+            "incremental_threshold_ratio": ConfigField(
+                type=float, default=0.1, description="增量刷新阈值比例 (0.05-0.5)"
+            ),
+            "full_rebuild_interval": ConfigField(
+                type=int, default=86400, description="完全重建间隔(秒) (3600-604800)"
+            ),
+            "deletion_check_interval": ConfigField(
+                type=int, default=10, description="删除检查间隔(秒) (5-100)"
+            ),
+        },
+        "jargon_cache": {
+            "batch_size": ConfigField(
+                type=int, default=100, description="批量处理大小 (10-500)"
+            ),
+            "batch_delay": ConfigField(
+                type=float, default=0.05, description="批量处理延迟(秒) (0.01-1.0)"
+            ),
+            "refresh_interval": ConfigField(
+                type=int, default=3600, description="刷新间隔(秒) (600-86400)"
+            ),
+            "enable_content_index": ConfigField(
+                type=bool, default=True, description="是否启用内容索引"
+            ),
+            "incremental_refresh_interval": ConfigField(
+                type=int, default=600, description="增量刷新间隔(秒) (60-3600)"
+            ),
+            "incremental_threshold_ratio": ConfigField(
+                type=float, default=0.1, description="增量刷新阈值比例 (0.05-0.5)"
+            ),
+            "full_rebuild_interval": ConfigField(
+                type=int, default=86400, description="完全重建间隔(秒) (3600-604800)"
+            ),
+            "deletion_check_interval": ConfigField(
+                type=int, default=10, description="删除检查间隔(秒) (5-100)"
+            ),
+        },
+        "kg_cache": {
+            "batch_size": ConfigField(
+                type=int, default=100, description="批量处理大小 (10-500)"
+            ),
+            "batch_delay": ConfigField(
+                type=float, default=0.05, description="批量处理延迟(秒) (0.01-1.0)"
+            ),
+            "refresh_interval": ConfigField(
+                type=int, default=3600, description="刷新间隔(秒) (600-86400)"
+            ),
+            "incremental_refresh_interval": ConfigField(
+                type=int, default=600, description="增量刷新间隔(秒) (60-3600)"
+            ),
+            "incremental_threshold_ratio": ConfigField(
+                type=float, default=0.1, description="增量刷新阈值比例 (0.05-0.5)"
+            ),
+            "full_rebuild_interval": ConfigField(
+                type=int, default=86400, description="完全重建间隔(秒) (3600-604800)"
+            ),
+            "deletion_check_interval": ConfigField(
+                type=int, default=10, description="删除检查间隔(秒) (5-100)"
+            ),
+            "use_parquet": ConfigField(
+                type=bool, default=True, description="是否使用Parquet格式"
+            ),
+        },
+        "db_tuning": {
+            "mmap_size": ConfigField(
                 type=int,
                 default=268435456,
-                description="SQLite mmap_size（字节，0=禁用）",
+                description="SQLite mmap_size(字节,0=禁用)",
             ),
-            "db_wal_checkpoint_interval": ConfigField(
+            "wal_checkpoint_interval": ConfigField(
                 type=int,
                 default=300,
-                description="WAL checkpoint 周期（秒，0=禁用）",
+                description="WAL checkpoint周期(秒,0=禁用)",
+            ),
+        },
+        "lightweight_profiler": {
+            "sample_rate": ConfigField(
+                type=float, default=0.1, description="采样率(0-1)"
             ),
         },
         "advanced": {
             "enable_async_io": ConfigField(
-                type=bool, default=True, description="是否启用异步IO优化"
+                type=bool, default=True, description="是否启用异步IO"
             ),
             "enable_orjson": ConfigField(
-                type=bool, default=True, description="是否启用orjson加速"
-            ),
-            "thread_pool_size": ConfigField(
-                type=int, default=4, description="线程池大小"
+                type=bool, default=True, description="是否启用orjson"
             ),
             "gc_interval": ConfigField(
-                type=int, default=300, description="垃圾回收间隔（秒）"
+                type=int, default=300, description="垃圾回收间隔(秒)"
+            ),
+            "enable_hot_reload": ConfigField(
+                type=bool, default=True, description="是否启用配置热重载"
+            ),
+            "strict_validation": ConfigField(
+                type=bool, default=False, description="是否启用严格验证"
+            ),
+            "enable_change_notifications": ConfigField(
+                type=bool, default=True, description="是否启用配置变更通知"
             ),
         },
         "monitoring": {
             "enable_stats": ConfigField(
-                type=bool, default=True, description="是否启用统计功能"
+                type=bool, default=True, description="是否启用统计"
             ),
             "stats_interval": ConfigField(
-                type=int, default=60, description="统计报告间隔（秒）"
+                type=int, default=60, description="统计间隔(秒) (10-3600)"
             ),
             "enable_memory_monitor": ConfigField(
                 type=bool, default=True, description="是否启用内存监控"
             ),
             "memory_warning_threshold": ConfigField(
-                type=float, default=0.8, description="内存警告阈值"
+                type=float, default=0.8, description="内存警告阈值(0-1)"
             ),
             "memory_critical_threshold": ConfigField(
-                type=float, default=0.9, description="内存临界阈值"
+                type=float, default=0.9, description="内存严重阈值(0-1)"
             ),
-        },
-        "modules": {
-            # message_cache 模块
-            "message_cache_enabled": ConfigField(
-                type=bool, default=True, description="启用热集缓存"
+            "enable_health_check": ConfigField(
+                type=bool, default=True, description="是否启用健康检查"
             ),
-            "message_cache_per_chat_limit": ConfigField(
-                type=int, default=200, description="每个聊天的缓存消息数量"
-            ),
-            "message_cache_ttl": ConfigField(
-                type=int, default=300, description="缓存过期时间（秒）"
-            ),
-            "message_cache_max_chats": ConfigField(
-                type=int, default=500, description="最大缓存聊天数"
-            ),
-            "message_cache_ignore_time_limit_when_active": ConfigField(
-                type=bool, default=True, description="活跃聊天流忽略TTL限制"
-            ),
-            "message_cache_active_time_window": ConfigField(
-                type=int, default=300, description="活跃时间窗口（秒）"
-            ),
-            # person_cache 模块
-            "person_cache_max_size": ConfigField(
-                type=int, default=3000, description="最大缓存条目数"
-            ),
-            "person_cache_ttl": ConfigField(
-                type=int, default=1800, description="缓存过期时间（秒）"
-            ),
-            "person_cache_warmup_enabled": ConfigField(
-                type=bool, default=True, description="启用预热功能"
-            ),
-            "person_cache_warmup_per_chat_sample": ConfigField(
-                type=int, default=30, description="预热时每聊天采样消息数"
-            ),
-            "person_cache_warmup_max_persons": ConfigField(
-                type=int, default=20, description="每聊天最多预热人数"
-            ),
-            "person_cache_warmup_ttl": ConfigField(
-                type=int, default=120, description="预热记录过期时间（秒）"
-            ),
-            # expression_cache 模块
-            "expression_cache_batch_size": ConfigField(
-                type=int, default=100, description="每批加载条数"
-            ),
-            "expression_cache_refresh_interval": ConfigField(
-                type=int, default=3600, description="自动刷新间隔（秒）"
-            ),
-            # jargon_cache 模块
-            "jargon_cache_batch_size": ConfigField(
-                type=int, default=100, description="每批加载条数"
-            ),
-            "jargon_cache_refresh_interval": ConfigField(
-                type=int, default=3600, description="自动刷新间隔（秒）"
-            ),
-            "jargon_cache_enable_content_index": ConfigField(
-                type=bool, default=True, description="启用内容索引"
-            ),
-            # kg_cache 模块
-            "kg_cache_batch_size": ConfigField(
-                type=int, default=100, description="每批加载条数"
-            ),
-            "kg_cache_refresh_interval": ConfigField(
-                type=int, default=3600, description="自动刷新间隔（秒）"
+            "health_check_interval": ConfigField(
+                type=int, default=30, description="健康检查间隔(秒) (10-300)"
             ),
         },
     }
@@ -1344,11 +1553,27 @@ class CMPerformanceOptimizerPlugin(BasePlugin):
         """
         return self._degraded, self._degraded_reason
 
+    async def reload_config(self) -> bool:
+        """重新加载配置（支持热更新）
+
+        Returns:
+            是否重载成功
+        """
+        if self._opt and self._opt._config_manager:
+            try:
+                self._opt._config_manager.load()
+                logger.info("[PerfOpt] ✓ 配置已重新加载")
+                return True
+            except Exception as e:
+                logger.error(f"[PerfOpt] 配置重载失败: {e}")
+                return False
+        return False
+
     def get_config(self, path: str, default: Any = None) -> Any:
         """获取配置值
 
         Args:
-            path: 配置路径，如 "performance.enable_message_cache"
+            path: 配置路径，如 "modules.message_cache_enabled"
             default: 默认值
 
         Returns:

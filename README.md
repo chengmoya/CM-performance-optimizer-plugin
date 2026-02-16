@@ -1,6 +1,6 @@
 # CM-performance-optimizer（性能优化插件）
 
-[![Version](https://img.shields.io/badge/version-5.0.0-blue.svg)]()
+[![Version](https://img.shields.io/badge/version-5.2.0-blue.svg)]()
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 CM-performance-optimizer 是一个面向 MaiBot 的性能优化插件。

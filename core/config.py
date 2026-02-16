@@ -220,7 +220,7 @@ class ExtendedConfigField:
 class ConfigVersion:
     """配置版本管理"""
 
-    CURRENT_VERSION = "2.0.0"
+    CURRENT_VERSION = "5.2.0"
     MIN_COMPATIBLE_VERSION = "1.0.0"
 
     @staticmethod
@@ -388,11 +388,17 @@ class ConfigManager:
         self._build_schema()
 
     def _build_schema(self):
-        """构建完整的配置 schema"""
+        """构建完整的配置 schema - 与config.toml结构匹配"""
         self._schema = {
             "plugin": self._build_plugin_schema(),
-            "performance": self._build_performance_schema(),
             "modules": self._build_modules_schema(),
+            "message_cache": self._build_message_cache_schema(),
+            "person_cache": self._build_person_cache_schema(),
+            "expression_cache": self._build_expression_cache_schema(),
+            "jargon_cache": self._build_jargon_cache_schema(),
+            "kg_cache": self._build_kg_cache_schema(),
+            "db_tuning": self._build_db_tuning_schema(),
+            "lightweight_profiler": self._build_lightweight_profiler_schema(),
             "advanced": self._build_advanced_schema(),
             "monitoring": self._build_monitoring_schema(),
         }
@@ -436,199 +442,119 @@ class ConfigManager:
             ),
         }
 
-    def _build_performance_schema(self) -> Dict[str, ExtendedConfigField]:
-        """性能模块开关 schema"""
+    def _build_modules_schema(self) -> Dict[str, ExtendedConfigField]:
+        """模块开关配置 schema - 只包含扁平化开关"""
         return {
-            "enable_message_cache": ExtendedConfigField(
+            "message_cache_enabled": ExtendedConfigField(
                 field_type=ConfigFieldType.BOOL,
                 default=True,
-                description="启用消息缓存",
-                section="performance",
+                description="是否启用消息缓存",
+                section="modules",
                 order=0,
             ),
-            "enable_message_repository_fastpath": ExtendedConfigField(
+            "message_repository_fastpath_enabled": ExtendedConfigField(
                 field_type=ConfigFieldType.BOOL,
                 default=True,
-                description="启用 message_repository.count_messages 快速路径（短期 count 缓存 + COUNT 查询）",
-                section="performance",
+                description="是否启用message_repository快速路径",
+                section="modules",
                 order=1,
             ),
-            "enable_person_cache": ExtendedConfigField(
+            "person_cache_enabled": ExtendedConfigField(
                 field_type=ConfigFieldType.BOOL,
                 default=True,
-                description="启用人物信息缓存",
-                section="performance",
+                description="是否启用人物信息缓存",
+                section="modules",
                 order=2,
             ),
-            "enable_expression_cache": ExtendedConfigField(
+            "expression_cache_enabled": ExtendedConfigField(
                 field_type=ConfigFieldType.BOOL,
                 default=True,
-                description="启用表达式缓存",
-                section="performance",
+                description="是否启用表达式缓存",
+                section="modules",
                 order=3,
             ),
-            "enable_jargon_cache": ExtendedConfigField(
+            "jargon_cache_enabled": ExtendedConfigField(
                 field_type=ConfigFieldType.BOOL,
                 default=True,
-                description="启用黑话缓存",
-                section="performance",
+                description="是否启用黑话缓存",
+                section="modules",
                 order=4,
             ),
-            "enable_jargon_matcher_automaton": ExtendedConfigField(
+            "jargon_matcher_automaton_enabled": ExtendedConfigField(
                 field_type=ConfigFieldType.BOOL,
                 default=True,
-                description="启用黑话匹配自动机加速（Aho-Corasick）",
-                section="performance",
+                description="是否启用黑话匹配自动机加速",
+                section="modules",
                 order=5,
             ),
-            "enable_kg_cache": ExtendedConfigField(
+            "kg_cache_enabled": ExtendedConfigField(
                 field_type=ConfigFieldType.BOOL,
                 default=True,
-                description="启用知识图谱缓存",
-                section="performance",
+                description="是否启用知识图谱缓存",
+                section="modules",
                 order=6,
             ),
-            "enable_levenshtein_fast": ExtendedConfigField(
+            "levenshtein_fast_enabled": ExtendedConfigField(
                 field_type=ConfigFieldType.BOOL,
                 default=True,
-                description="启用 Levenshtein 距离加速（rapidfuzz）",
-                section="performance",
-                order=6,
-            ),
-            "enable_image_desc_bulk_lookup": ExtendedConfigField(
-                field_type=ConfigFieldType.BOOL,
-                default=True,
-                description="启用图片描述批量替换（WHERE IN 批量查询）",
-                section="performance",
+                description="是否启用Levenshtein距离加速",
+                section="modules",
                 order=7,
             ),
-            "enable_user_reference_batch_resolve": ExtendedConfigField(
+            "image_desc_bulk_lookup_enabled": ExtendedConfigField(
                 field_type=ConfigFieldType.BOOL,
                 default=True,
-                description="启用用户引用批量解析缓存（@<...>/回复<...> 名称解析）",
-                section="performance",
+                description="是否启用图片描述批量替换",
+                section="modules",
                 order=8,
             ),
-            "enable_regex_precompile": ExtendedConfigField(
+            "user_reference_batch_resolve_enabled": ExtendedConfigField(
                 field_type=ConfigFieldType.BOOL,
                 default=True,
-                description="启用 regex_precompile（预编译高频正则 + 动态正则 LRU 缓存）",
-                section="performance",
+                description="是否启用用户引用批量解析",
+                section="modules",
                 order=9,
             ),
-            "enable_typo_generator_cache": ExtendedConfigField(
+            "regex_precompile_enabled": ExtendedConfigField(
                 field_type=ConfigFieldType.BOOL,
                 default=True,
-                description=(
-                    "启用 typo_generator_cache（pinyin_dict 持久化缓存 + jieba valid_words 内存缓存）"
-                ),
-                section="performance",
+                description="是否启用正则预编译",
+                section="modules",
                 order=10,
             ),
-            "enable_lightweight_profiler": ExtendedConfigField(
-                field_type=ConfigFieldType.BOOL,
-                default=False,
-                description="启用轻量性能剖析（纯观测层）",
-                section="performance",
-                order=10,
-            ),
-            "profiler_sample_rate": ExtendedConfigField(
-                field_type=ConfigFieldType.FLOAT,
-                default=0.1,
-                description="轻量性能剖析采样率（0-1）",
-                constraint=ConfigConstraint(min_value=0.0, max_value=1.0),
-                section="performance",
-                order=10,
-                hot_reload=True,
-            ),
-            "enable_db_tuning": ExtendedConfigField(
+            "typo_generator_cache_enabled": ExtendedConfigField(
                 field_type=ConfigFieldType.BOOL,
                 default=True,
-                description="启用 SQLite 数据库调优（PRAGMA + 索引自检）",
-                section="performance",
+                description="是否启用typo_generator缓存",
+                section="modules",
                 order=11,
             ),
-            "db_mmap_size": ExtendedConfigField(
-                field_type=ConfigFieldType.INT,
-                default=268435456,
-                description="SQLite mmap_size（字节，0=禁用）",
-                constraint=ConfigConstraint(min_value=0, max_value=2147483647),
-                section="performance",
-                order=12,
-            ),
-            "db_wal_checkpoint_interval": ExtendedConfigField(
-                field_type=ConfigFieldType.INT,
-                default=300,
-                description="WAL checkpoint 周期（秒，0=禁用）",
-                constraint=ConfigConstraint(min_value=0, max_value=86400),
-                section="performance",
-                order=13,
-            ),
-            "enable_asyncio_loop_pool": ExtendedConfigField(
+            "db_tuning_enabled": ExtendedConfigField(
                 field_type=ConfigFieldType.BOOL,
                 default=True,
-                description=(
-                    "启用 asyncio_loop_pool（embedding 工作线程复用 thread-local event loop；高风险，默认开启）"
-                ),
-                section="performance",
+                description="是否启用SQLite数据库调优",
+                section="modules",
+                order=12,
+            ),
+            "lightweight_profiler_enabled": ExtendedConfigField(
+                field_type=ConfigFieldType.BOOL,
+                default=False,
+                description="是否启用轻量性能剖析",
+                section="modules",
+                order=13,
+            ),
+            "asyncio_loop_pool_enabled": ExtendedConfigField(
+                field_type=ConfigFieldType.BOOL,
+                default=True,
+                description="是否启用asyncio_loop_pool",
+                section="modules",
                 order=14,
-            ),
-        }
-
-    def _build_modules_schema(self) -> Dict[str, ExtendedConfigField]:
-        """模块详细配置 schema"""
-        return {
-            "message_cache": ExtendedConfigField(
-                field_type=ConfigFieldType.NESTED,
-                default={},
-                description="消息缓存配置",
-                section="modules",
-                order=0,
-                nested_schema=self._build_message_cache_schema(),
-            ),
-            "person_cache": ExtendedConfigField(
-                field_type=ConfigFieldType.NESTED,
-                default={},
-                description="人物信息缓存配置",
-                section="modules",
-                order=1,
-                nested_schema=self._build_person_cache_schema(),
-            ),
-            "expression_cache": ExtendedConfigField(
-                field_type=ConfigFieldType.NESTED,
-                default={},
-                description="表达式缓存配置",
-                section="modules",
-                order=2,
-                nested_schema=self._build_expression_cache_schema(),
-            ),
-            "jargon_cache": ExtendedConfigField(
-                field_type=ConfigFieldType.NESTED,
-                default={},
-                description="黑话缓存配置",
-                section="modules",
-                order=3,
-                nested_schema=self._build_jargon_cache_schema(),
-            ),
-            "kg_cache": ExtendedConfigField(
-                field_type=ConfigFieldType.NESTED,
-                default={},
-                description="知识图谱缓存配置",
-                section="modules",
-                order=4,
-                nested_schema=self._build_kg_cache_schema(),
             ),
         }
 
     def _build_message_cache_schema(self) -> Dict[str, ExtendedConfigField]:
         """消息缓存详细配置"""
         return {
-            "enabled": ExtendedConfigField(
-                field_type=ConfigFieldType.BOOL,
-                default=True,
-                description="启用热集缓存",
-                hot_reload=True,
-            ),
             "per_chat_limit": ExtendedConfigField(
                 field_type=ConfigFieldType.INT,
                 default=200,
@@ -668,6 +594,22 @@ class ConfigManager:
                 default=300.0,
                 description="时间戳归一化窗口（秒）",
                 constraint=ConfigConstraint(min_value=60.0, max_value=600.0),
+            ),
+            "bucket_enabled": ExtendedConfigField(
+                field_type=ConfigFieldType.BOOL,
+                default=False,
+                description="滑动窗口分桶功能（预留）",
+            ),
+            "bucket_seconds": ExtendedConfigField(
+                field_type=ConfigFieldType.INT,
+                default=5,
+                description="分桶时间间隔（秒）",
+            ),
+            "mode": ExtendedConfigField(
+                field_type=ConfigFieldType.STR,
+                default="query",
+                description="缓存模式: query 或 full",
+                constraint=ConfigConstraint(choices=["query", "full"]),
             ),
         }
 
@@ -715,11 +657,11 @@ class ConfigManager:
                 constraint=ConfigConstraint(min_value=30, max_value=600),
                 hot_reload=True,
             ),
-            "warmup_debounce": ExtendedConfigField(
+            "warmup_debounce_seconds": ExtendedConfigField(
                 field_type=ConfigFieldType.FLOAT,
                 default=3.0,
                 description="预热防抖时间（秒）",
-                constraint=ConfigConstraint(min_value=1.0, max_value=10.0),
+                constraint=ConfigConstraint(min_value=0.5, max_value=10.0),
                 hot_reload=True,
             ),
         }
@@ -745,6 +687,31 @@ class ConfigManager:
                 description="自动刷新间隔（秒）",
                 constraint=ConfigConstraint(min_value=600, max_value=86400),
                 hot_reload=True,
+            ),
+            "incremental_refresh_interval": ExtendedConfigField(
+                field_type=ConfigFieldType.INT,
+                default=600,
+                description="增量刷新间隔（秒）",
+                constraint=ConfigConstraint(min_value=60, max_value=3600),
+                hot_reload=True,
+            ),
+            "incremental_threshold_ratio": ExtendedConfigField(
+                field_type=ConfigFieldType.FLOAT,
+                default=0.1,
+                description="触发全量重建的增量比例阈值",
+                constraint=ConfigConstraint(min_value=0.01, max_value=1.0),
+            ),
+            "full_rebuild_interval": ExtendedConfigField(
+                field_type=ConfigFieldType.INT,
+                default=86400,
+                description="全量重建间隔（秒）",
+                constraint=ConfigConstraint(min_value=3600, max_value=604800),
+            ),
+            "deletion_check_interval": ExtendedConfigField(
+                field_type=ConfigFieldType.INT,
+                default=10,
+                description="删除检测间隔（每N次增量刷新）",
+                constraint=ConfigConstraint(min_value=1, max_value=100),
             ),
         }
 
@@ -775,6 +742,31 @@ class ConfigManager:
                 default=True,
                 description="启用内容索引",
             ),
+            "incremental_refresh_interval": ExtendedConfigField(
+                field_type=ConfigFieldType.INT,
+                default=600,
+                description="增量刷新间隔（秒）",
+                constraint=ConfigConstraint(min_value=60, max_value=3600),
+                hot_reload=True,
+            ),
+            "incremental_threshold_ratio": ExtendedConfigField(
+                field_type=ConfigFieldType.FLOAT,
+                default=0.1,
+                description="触发全量重建的增量比例阈值",
+                constraint=ConfigConstraint(min_value=0.01, max_value=1.0),
+            ),
+            "full_rebuild_interval": ExtendedConfigField(
+                field_type=ConfigFieldType.INT,
+                default=86400,
+                description="全量重建间隔（秒）",
+                constraint=ConfigConstraint(min_value=3600, max_value=604800),
+            ),
+            "deletion_check_interval": ExtendedConfigField(
+                field_type=ConfigFieldType.INT,
+                default=10,
+                description="删除检测间隔（每N次增量刷新）",
+                constraint=ConfigConstraint(min_value=1, max_value=100),
+            ),
         }
 
     def _build_kg_cache_schema(self) -> Dict[str, ExtendedConfigField]:
@@ -797,6 +789,67 @@ class ConfigManager:
                 default=3600,
                 description="自动刷新间隔（秒）",
                 constraint=ConfigConstraint(min_value=600, max_value=86400),
+                hot_reload=True,
+            ),
+            "incremental_refresh_interval": ExtendedConfigField(
+                field_type=ConfigFieldType.INT,
+                default=600,
+                description="增量刷新间隔（秒）",
+                constraint=ConfigConstraint(min_value=60, max_value=3600),
+                hot_reload=True,
+            ),
+            "incremental_threshold_ratio": ExtendedConfigField(
+                field_type=ConfigFieldType.FLOAT,
+                default=0.1,
+                description="触发全量重建的增量比例阈值",
+                constraint=ConfigConstraint(min_value=0.01, max_value=1.0),
+            ),
+            "full_rebuild_interval": ExtendedConfigField(
+                field_type=ConfigFieldType.INT,
+                default=86400,
+                description="全量重建间隔（秒）",
+                constraint=ConfigConstraint(min_value=3600, max_value=604800),
+            ),
+            "deletion_check_interval": ExtendedConfigField(
+                field_type=ConfigFieldType.INT,
+                default=10,
+                description="删除检测间隔（每N次增量刷新）",
+                constraint=ConfigConstraint(min_value=1, max_value=100),
+            ),
+            "use_parquet": ExtendedConfigField(
+                field_type=ConfigFieldType.BOOL,
+                default=True,
+                description="启用 Parquet 格式存储",
+            ),
+        }
+
+    def _build_db_tuning_schema(self) -> Dict[str, ExtendedConfigField]:
+        """数据库调优配置 schema"""
+        return {
+            "mmap_size": ExtendedConfigField(
+                field_type=ConfigFieldType.INT,
+                default=268435456,
+                description="SQLite mmap_size(字节,0=禁用)",
+                constraint=ConfigConstraint(min_value=0, max_value=2147483647),
+                hot_reload=True,
+            ),
+            "wal_checkpoint_interval": ExtendedConfigField(
+                field_type=ConfigFieldType.INT,
+                default=300,
+                description="WAL checkpoint周期(秒,0=禁用)",
+                constraint=ConfigConstraint(min_value=0, max_value=86400),
+                hot_reload=True,
+            ),
+        }
+
+    def _build_lightweight_profiler_schema(self) -> Dict[str, ExtendedConfigField]:
+        """轻量性能剖析配置 schema"""
+        return {
+            "sample_rate": ExtendedConfigField(
+                field_type=ConfigFieldType.FLOAT,
+                default=0.1,
+                description="采样率(0-1)",
+                constraint=ConfigConstraint(min_value=0.0, max_value=1.0),
                 hot_reload=True,
             ),
         }
@@ -822,7 +875,7 @@ class ConfigManager:
                 field_type=ConfigFieldType.INT,
                 default=4,
                 description="线程池大小",
-                constraint=ConfigConstraint(min_value=1, max_value=16),
+                constraint=ConfigConstraint(min_value=1, max_value=32),
                 section="advanced",
                 order=2,
             ),
@@ -834,6 +887,27 @@ class ConfigManager:
                 section="advanced",
                 order=3,
                 hot_reload=True,
+            ),
+            "enable_hot_reload": ExtendedConfigField(
+                field_type=ConfigFieldType.BOOL,
+                default=True,
+                description="启用配置热更新",
+                section="advanced",
+                order=4,
+            ),
+            "strict_validation": ExtendedConfigField(
+                field_type=ConfigFieldType.BOOL,
+                default=False,
+                description="配置验证严格模式",
+                section="advanced",
+                order=5,
+            ),
+            "enable_change_notifications": ExtendedConfigField(
+                field_type=ConfigFieldType.BOOL,
+                default=True,
+                description="启用配置变更通知",
+                section="advanced",
+                order=6,
             ),
         }
 
@@ -867,7 +941,7 @@ class ConfigManager:
                 field_type=ConfigFieldType.FLOAT,
                 default=0.8,
                 description="内存警告阈值（0-1）",
-                constraint=ConfigConstraint(min_value=0.5, max_value=0.95),
+                constraint=ConfigConstraint(min_value=0.1, max_value=1.0),
                 section="monitoring",
                 order=3,
                 hot_reload=True,
@@ -876,10 +950,25 @@ class ConfigManager:
                 field_type=ConfigFieldType.FLOAT,
                 default=0.9,
                 description="内存临界阈值（0-1）",
-                constraint=ConfigConstraint(min_value=0.7, max_value=0.99),
+                constraint=ConfigConstraint(min_value=0.1, max_value=1.0),
                 section="monitoring",
                 order=4,
                 hot_reload=True,
+            ),
+            "enable_health_check": ExtendedConfigField(
+                field_type=ConfigFieldType.BOOL,
+                default=True,
+                description="启用健康检查",
+                section="monitoring",
+                order=5,
+            ),
+            "health_check_interval": ExtendedConfigField(
+                field_type=ConfigFieldType.INT,
+                default=30,
+                description="健康检查间隔（秒）",
+                constraint=ConfigConstraint(min_value=10, max_value=300),
+                section="monitoring",
+                order=6,
             ),
         }
 
@@ -989,7 +1078,7 @@ class ConfigManager:
         """获取配置值
 
         Args:
-            path: 配置路径，如 "performance.enable_message_cache" 或 "modules.message_cache.ttl"
+            path: 配置路径，如 "modules.message_cache_enabled" 或 "modules.message_cache.ttl"
             default: 默认值
 
         Returns:

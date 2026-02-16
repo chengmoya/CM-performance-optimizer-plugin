@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "CM-performance-optimizer",
-  "version": "5.0.0",
+  "version": "5.2.0",
   "description": "性能优化 - 消息缓存（查询模式/全量模式） + 消息热集 + 人物信息缓存 + 表达式缓存 + 黑话缓存 + 知识库图谱缓存",
   "author": {
     "name": "城陌"
