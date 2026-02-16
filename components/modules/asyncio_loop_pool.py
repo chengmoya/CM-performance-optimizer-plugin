@@ -20,7 +20,6 @@
 from __future__ import annotations
 
 import asyncio
-import importlib.util
 import sys
 import threading
 from pathlib import Path
@@ -38,44 +37,38 @@ except ImportError:  # pragma: no cover
 logger = get_logger("CM_perf_opt")
 
 
-def _load_core_module():
-    """动态加载 core 模块，避免相对导入问题。"""
-
-    module_name = "CM_perf_opt_core"
-    if module_name in sys.modules:
-        return sys.modules[module_name]
-
-    current_dir = Path(__file__).parent
-    plugin_dir = current_dir.parent.parent  # components/modules -> components -> plugin root
-    core_init = plugin_dir / "core" / "__init__.py"
-
-    if not core_init.exists():
-        raise ImportError(f"Core module not found at {core_init}")
-
-    spec = importlib.util.spec_from_file_location(module_name, core_init)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Failed to load core module from {core_init}")
-
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
-
-    # 尝试预加载 core 子模块，避免 __init__ 中的相对导入失败
-    for submodule in ["cache", "utils", "config", "monitor", "module_config"]:
-        sub_path = plugin_dir / "core" / f"{submodule}.py"
-        if not sub_path.exists():
-            continue
-        sub_name = f"CM_perf_opt_core_{submodule}"
-        if sub_name in sys.modules:
-            continue
-        sub_spec = importlib.util.spec_from_file_location(sub_name, sub_path)
-        if sub_spec is None or sub_spec.loader is None:
-            continue
-        sub_mod = importlib.util.module_from_spec(sub_spec)
-        sys.modules[sub_name] = sub_mod
-        sub_spec.loader.exec_module(sub_mod)
-
-    spec.loader.exec_module(module)
-    return module
+# 从公共模块导入动态加载函数
+try:
+    from core.compat import load_core_module, CoreModuleLoadError
+except ImportError:
+    # 回退定义
+    import importlib.util
+    
+    def load_core_module(caller_path=None, module_name="CM_perf_opt_core", submodules=None):
+        """Fallback load_core_module 实现"""
+        module_name = "CM_perf_opt_core"
+        if module_name in sys.modules:
+            return sys.modules[module_name]
+        
+        current_dir = Path(__file__).parent
+        plugin_dir = current_dir.parent.parent
+        core_init = plugin_dir / "core" / "__init__.py"
+        
+        if not core_init.exists():
+            raise ImportError(f"Core module not found at {core_init}")
+        
+        spec = importlib.util.spec_from_file_location(module_name, core_init)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"Failed to load core module from {core_init}")
+        
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        spec.loader.exec_module(module)
+        return module
+    
+    class CoreModuleLoadError(ImportError):
+        """Core 模块加载失败异常"""
+        pass
 
 
 class _StatsAdapter:

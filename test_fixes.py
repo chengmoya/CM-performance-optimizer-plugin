@@ -74,12 +74,12 @@ def test_config_loading():
         
         # 验证配置项
         assert config['plugin']['enabled'] == True
-        assert config['performance']['enable_message_cache'] == True
-        assert config['performance']['enable_person_cache'] == True
-        assert config['performance']['enable_expression_cache'] == True
-        assert config['performance']['enable_jargon_cache'] == True
-        assert config['performance']['enable_jargon_matcher_automaton'] == True
-        assert config['performance']['enable_kg_cache'] == True
+        assert config['modules']['message_cache_enabled'] == True
+        assert config['modules']['person_cache_enabled'] == True
+        assert config['modules']['expression_cache_enabled'] == True
+        assert config['modules']['jargon_cache_enabled'] == True
+        assert config['modules']['jargon_matcher_automaton_enabled'] == True
+        assert config['modules']['kg_cache_enabled'] == True
         
         print("✓ 配置项验证通过")
         

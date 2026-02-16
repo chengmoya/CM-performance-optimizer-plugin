@@ -11,39 +11,48 @@ from collections import OrderedDict
 from typing import Optional, Dict, Any, Tuple, List, Callable, Awaitable, cast
 from pathlib import Path
 
-# 动态加载核心模块，避免相对导入问题
-def _load_core_module():
-    """动态加载 core 模块，避免相对导入问题"""
-    module_name = "CM_perf_opt_core"
-    if module_name in sys.modules:
-        return sys.modules[module_name]
+# 从公共模块导入动态加载函数
+try:
+    from core.compat import load_core_module, CoreModuleLoadError
+except ImportError:
+    # 回退定义
+    def load_core_module(caller_path=None, module_name="CM_perf_opt_core", submodules=None):
+        """Fallback load_core_module 实现"""
+        module_name = "CM_perf_opt_core"
+        if module_name in sys.modules:
+            return sys.modules[module_name]
+        
+        current_dir = Path(__file__).parent
+        plugin_dir = current_dir.parent.parent
+        core_init = plugin_dir / "core" / "__init__.py"
+        
+        if not core_init.exists():
+            raise ImportError(f"Core module not found at {core_init}")
+        
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(module_name, core_init)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"Could not load core module spec from {core_init}")
+        
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        spec.loader.exec_module(module)
+        return module
     
-    current_dir = Path(__file__).parent
-    plugin_dir = current_dir.parent.parent
-    core_init = plugin_dir / "core" / "__init__.py"
-    
-    if not core_init.exists():
-        raise ImportError(f"Core module not found at {core_init}")
-    
-    import importlib.util
-    spec = importlib.util.spec_from_file_location(module_name, core_init)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Could not load core module spec from {core_init}")
-    
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
-    spec.loader.exec_module(module)
-    return module
+    class CoreModuleLoadError(ImportError):
+        """Core 模块加载失败异常"""
+        pass
+
 
 # 尝试加载核心模块，失败时使用内置实现
 try:
-    core = _load_core_module()
+    core = load_core_module(Path(__file__).parent)
     TTLCache = core.TTLCache
     ModuleStats = core.ModuleStats
     MemoryUtils = core.MemoryUtils
     ChatVersionTracker = core.ChatVersionTracker
     rate = core.rate
-except Exception as e:
+except (ImportError, CoreModuleLoadError) as e:
     # 内置实现
     class ModuleStats:
         """Fallback ModuleStats 实现"""
@@ -902,7 +911,7 @@ class MessageCacheModule:
             cacheable = False
             try:
                 logger.warning(
-                    "[MsgCache] 禁止缓存无 chat_id 的查询，避免跨群命中 message_filter=%s",
+                    "[MsgCache] 禁止缓存无 chat_id 的查询，避免跨群命中 message_filter=%r",
                     mf,
                 )
             except Exception:
@@ -954,22 +963,22 @@ class MessageCacheModule:
                 # 只对"单边上界"做归一化；如果还有其他操作符，先保守不归一化
                 if ops.issubset({"$lt", "$lte"}):
                     ts_val = time_cond.get("$lt", time_cond.get("$lte"))
-                    try:
-                        if ts_val is None:
-                            cacheable = False
-                            ts_float = 0.0
-                        else:
+                    # BUG FIX: 添加边界检查，避免 ts_val 为 None 时触发 UnboundLocalError
+                    if ts_val is None:
+                        cacheable = False
+                    else:
+                        try:
                             now = time.time()
                             ts_float = float(ts_val)  # 兼容 int/float/str
-                        # 太久以前的 `$lt` 大概率是历史查询：不归一化且不缓存，避免误缓存/爆 key
-                        if ts_float < (now - MSG_CACHE_NORMALIZE_LT_WINDOW_SECONDS):
-                            cacheable = False
-                        else:
-                            mf_for_key = dict(mf)
-                            mf_for_key["time"] = {"$lt": "__NOW__"}
-                    except Exception:
-                        # 无法解析时间戳，保持原样
-                        pass
+                            # 太久以前的 `$lt` 大概率是历史查询：不归一化且不缓存，避免误缓存/爆 key
+                            if ts_float < (now - MSG_CACHE_NORMALIZE_LT_WINDOW_SECONDS):
+                                cacheable = False
+                            else:
+                                mf_for_key = dict(mf)
+                                mf_for_key["time"] = {"$lt": "__NOW__"}
+                        except Exception:
+                            # 无法解析时间戳，保持原样
+                            pass
 
         # ---- 2) time 量化（仅用于 key 生成；不影响实际查询 filter） ----
         mf_for_key = _quantize_time_fields_for_key(mf_for_key, quantum=3.0)

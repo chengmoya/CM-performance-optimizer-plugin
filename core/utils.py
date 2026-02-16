@@ -5,6 +5,10 @@
 import threading
 from typing import Any, Dict
 
+# ========== 常量定义 ==========
+# 慢查询阈值（秒）：超过此时间的查询被归类为慢查询
+SLOW_QUERY_THRESHOLD = 0.1
+
 
 class ModuleStats:
     """单个模块的统计。
@@ -60,7 +64,7 @@ class ModuleStats:
             self.t_miss += 1
             self.i_miss += 1
 
-            if float(elapsed) > 0.1:
+            if float(elapsed) > SLOW_QUERY_THRESHOLD:
                 self.t_slow += 1
                 self.i_slow += 1
                 self.t_slow_time += float(elapsed)
@@ -136,7 +140,17 @@ class ModuleStats:
             }
 
 
-def rate(hit, miss, filtered=0):
+def rate(hit: int, miss: int, filtered: int = 0) -> float:
+    """计算缓存命中率。
+    
+    Args:
+        hit: 命中次数
+        miss: 未命中次数
+        filtered: 过滤次数（可选）
+        
+    Returns:
+        命中率百分比（0-100）
+    """
     t = hit + miss + filtered
     return (hit / t * 100) if t > 0 else 0
 
@@ -147,15 +161,31 @@ class ChatVersionTracker:
     用于让"按 chat_id 拉最近上下文"的缓存键稳定命中，且在新消息写入后自动失效。
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._lock = threading.Lock()
         self._ver: Dict[str, int] = {}
 
     def get(self, chat_id: str) -> int:
+        """获取指定 chat_id 的当前版本号。
+        
+        Args:
+            chat_id: 聊天 ID
+            
+        Returns:
+            当前版本号，若不存在则返回 0
+        """
         with self._lock:
             return int(self._ver.get(chat_id, 0))
 
     def bump(self, chat_id: str) -> int:
+        """递增指定 chat_id 的版本号。
+        
+        Args:
+            chat_id: 聊天 ID
+            
+        Returns:
+            递增后的新版本号
+        """
         with self._lock:
             v = int(self._ver.get(chat_id, 0)) + 1
             self._ver[chat_id] = v

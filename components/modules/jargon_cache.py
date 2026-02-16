@@ -4,12 +4,12 @@
 采用动态导入 core 模块，避免相对导入问题。
 支持内容索引加速精确匹配查询。
 支持增量更新机制，减少全量刷新开销。
+集成 ExpirationManager 统一过期策略管理。
 """
 
 from __future__ import annotations
 
 import asyncio
-import importlib.util
 import sys
 import threading
 import time
@@ -28,54 +28,61 @@ except ImportError:
 logger = get_logger("CM_perf_opt")
 
 
-def _load_core_module():
-    """动态加载 core 模块，避免相对导入问题"""
-    module_name = "CM_perf_opt_core"
-    if module_name in sys.modules:
-        return sys.modules[module_name]
+# 从公共模块导入动态加载函数
+try:
+    from core.compat import load_core_module, CoreModuleLoadError
+except ImportError:
+    # 回退定义
+    import importlib.util
     
-    # 定位 core 目录
-    current_dir = Path(__file__).parent
-    plugin_dir = current_dir.parent.parent  # components/modules -> components -> plugin root
-    core_init = plugin_dir / "core" / "__init__.py"
+    def load_core_module(caller_path=None, module_name="CM_perf_opt_core", submodules=None):
+        """Fallback load_core_module 实现"""
+        module_name = "CM_perf_opt_core"
+        if module_name in sys.modules:
+            return sys.modules[module_name]
+        
+        current_dir = Path(__file__).parent
+        plugin_dir = current_dir.parent.parent
+        core_init = plugin_dir / "core" / "__init__.py"
+        
+        if not core_init.exists():
+            raise ImportError(f"Core module not found at {core_init}")
+        
+        spec = importlib.util.spec_from_file_location(module_name, core_init)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"Failed to load core module from {core_init}")
+        
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        spec.loader.exec_module(module)
+        return module
     
-    if not core_init.exists():
-        raise ImportError(f"Core module not found at {core_init}")
-    
-    spec = importlib.util.spec_from_file_location(module_name, core_init)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Failed to load core module from {core_init}")
-    
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
-    
-    # 确保 core 子模块也被正确加载
-    for submodule in ["cache", "utils", "config", "monitor", "module_config"]:
-        sub_path = plugin_dir / "core" / f"{submodule}.py"
-        if sub_path.exists():
-            sub_name = f"CM_perf_opt_core_{submodule}"
-            if sub_name not in sys.modules:
-                sub_spec = importlib.util.spec_from_file_location(sub_name, sub_path)
-                if sub_spec and sub_spec.loader:
-                    sub_module = importlib.util.module_from_spec(sub_spec)
-                    sys.modules[sub_name] = sub_module
-                    sub_spec.loader.exec_module(sub_module)
-    
-    spec.loader.exec_module(module)
-    return module
+    class CoreModuleLoadError(ImportError):
+        """Core 模块加载失败异常"""
+        pass
 
 
 # 动态导入核心模块
 try:
     # 优先尝试相对导入（在正确的包结构中）
     from ..core import ModuleStats, MemoryUtils
+    from ..core import (
+        ExpirationConfig,
+        ExpirationManager,
+        DatabaseExpirationManager,
+        RefreshDecision,
+    )
 except ImportError:
     try:
         # 回退到动态加载
-        _core = _load_core_module()
+        _core = load_core_module(Path(__file__).parent)
         ModuleStats = _core.ModuleStats
         MemoryUtils = _core.MemoryUtils
-    except Exception as e:
+        ExpirationConfig = _core.ExpirationConfig
+        ExpirationManager = _core.ExpirationManager
+        DatabaseExpirationManager = _core.DatabaseExpirationManager
+        RefreshDecision = _core.RefreshDecision
+    except (ImportError, CoreModuleLoadError) as e:
         logger.warning(f"[JargonCache] 无法加载核心模块，使用内置实现: {e}")
         
         # 内置 fallback 实现
@@ -143,6 +150,74 @@ except ImportError:
                 elif isinstance(obj, (list, tuple, set, frozenset)):
                     size += sum(MemoryUtils.get_size(i, seen) for i in obj)
                 return size
+        
+        # Fallback ExpirationManager 实现
+        from dataclasses import dataclass
+        from enum import Enum
+        
+        class RefreshDecision(Enum):
+            SKIP = "skip"
+            INCREMENTAL = "incremental"
+            FULL_REBUILD = "full_rebuild"
+            DELETION_CHECK = "deletion_check"
+        
+        @dataclass
+        class ExpirationConfig:
+            incremental_refresh_interval: int = 600
+            full_rebuild_interval: int = 86400
+            incremental_threshold_ratio: float = 0.1
+            deletion_check_interval: int = 10
+        
+        @dataclass
+        class ExpirationState:
+            last_full_rebuild: float = 0.0
+            last_incremental_refresh: float = 0.0
+            incremental_refresh_count: int = 0
+            total_count: int = 0
+            incremental_count: int = 0
+            last_max_id: int = 0
+        
+        class ExpirationManager:
+            def __init__(self, config, name="cache"):
+                self._config = config
+                self._name = name
+                self._state = ExpirationState()
+            
+            @property
+            def state(self):
+                return self._state
+            
+            def get_refresh_decision(self, is_first_load=False):
+                return RefreshDecision.FULL_REBUILD if is_first_load else RefreshDecision.INCREMENTAL
+            
+            def record_full_rebuild(self, total_count, max_id=0):
+                self._state.last_full_rebuild = time.time()
+                self._state.total_count = total_count
+                self._state.incremental_count = 0
+                self._state.last_max_id = max_id
+            
+            def record_incremental_refresh(self, new_count, new_max_id=None):
+                self._state.incremental_count += new_count
+                self._state.total_count += new_count
+                self._state.incremental_refresh_count += 1
+                if new_max_id is not None:
+                    self._state.last_max_id = new_max_id
+            
+            def get_state_dict(self):
+                return {
+                    "last_full_rebuild": self._state.last_full_rebuild,
+                    "total_count": self._state.total_count,
+                    "incremental_count": self._state.incremental_count,
+                    "last_max_id": self._state.last_max_id,
+                    "incremental_refresh_count": self._state.incremental_refresh_count,
+                }
+        
+        class DatabaseExpirationManager(ExpirationManager):
+            def get_last_max_id(self):
+                return self._state.last_max_id
+            
+            def should_skip_incremental(self, current_max_id):
+                return current_max_id <= self._state.last_max_id
 
 
 class JargonCacheModule:
@@ -183,6 +258,8 @@ class JargonCacheModule:
         incremental_threshold_ratio: float = 0.1,
         full_rebuild_interval: int = 86400,
         deletion_check_interval: int = 10,
+        # 支持传入 ExpirationConfig
+        expiration_config: Optional["ExpirationConfig"] = None,
     ):
         """初始化黑话缓存模块
 
@@ -195,6 +272,7 @@ class JargonCacheModule:
             incremental_threshold_ratio: 触发全量重建的增量比例阈值，默认 0.1（10%）
             full_rebuild_interval: 全量重建间隔秒数，默认 86400（24小时）
             deletion_check_interval: 删除检测间隔（每 N 次增量刷新），默认 10
+            expiration_config: 过期配置对象，如果提供则覆盖单独的参数
         """
         # 双缓冲
         self.buffer_a: Optional[List[Any]] = None
@@ -211,13 +289,30 @@ class JargonCacheModule:
         self.batch_delay = max(0.001, float(batch_delay))
         self.refresh_interval = max(60, int(refresh_interval))
 
-        # 增量更新配置
-        self._incremental_refresh_interval = max(60, int(incremental_refresh_interval))
-        self._incremental_threshold_ratio = max(0.01, min(1.0, float(incremental_threshold_ratio)))
-        self._full_rebuild_interval = max(3600, int(full_rebuild_interval))
-        self._deletion_check_interval = max(1, int(deletion_check_interval))
+        # 初始化过期管理器
+        if expiration_config is not None:
+            self._expiration_config = expiration_config
+        else:
+            self._expiration_config = ExpirationConfig(
+                incremental_refresh_interval=incremental_refresh_interval,
+                full_rebuild_interval=full_rebuild_interval,
+                incremental_threshold_ratio=incremental_threshold_ratio,
+                deletion_check_interval=deletion_check_interval,
+            )
+        
+        # 创建数据库过期管理器
+        self._expiration_manager = DatabaseExpirationManager(
+            config=self._expiration_config,
+            name="jargon_cache",
+        )
 
-        # 增量更新追踪器
+        # 兼容旧接口：保留属性访问
+        self._incremental_refresh_interval = self._expiration_config.incremental_refresh_interval
+        self._incremental_threshold_ratio = self._expiration_config.incremental_threshold_ratio
+        self._full_rebuild_interval = self._expiration_config.full_rebuild_interval
+        self._deletion_check_interval = self._expiration_config.deletion_check_interval
+
+        # 增量更新追踪器（保留用于向后兼容）
         self._tracker: Dict[str, Any] = {
             "last_max_id": 0,
             "total_count": 0,
@@ -299,54 +394,68 @@ class JargonCacheModule:
     def _should_full_rebuild(self) -> bool:
         """判断是否需要全量重建
 
+        使用 ExpirationManager 进行决策。
+
         Returns:
             True 表示需要全量重建
         """
-        now = time.time()
+        # 使用过期管理器获取刷新决策
+        decision = self._expiration_manager.get_refresh_decision(
+            is_first_load=(self.buffer_a is None)
+        )
+        
+        return decision == RefreshDecision.FULL_REBUILD
+    
+    def _get_refresh_decision(self) -> "RefreshDecision":
+        """获取刷新决策
 
-        # 首次加载
-        with self.buffer_lock:
-            if self.buffer_a is None:
-                return True
+        使用 ExpirationManager 进行决策。
 
-            cache_size = len(self.buffer_a)
-
-        # 达到全量重建间隔
-        if now - self._tracker["last_full_rebuild"] > self._full_rebuild_interval:
-            logger.info("[JargonCache] 达到全量重建间隔，触发全量重建")
-            return True
-
-        # 累计增量超过阈值
-        if cache_size > 0:
-            ratio = self._tracker["incremental_count"] / cache_size
-            if ratio > self._incremental_threshold_ratio:
-                logger.info(f"[JargonCache] 增量比例 {ratio:.2%} 超过阈值 {self._incremental_threshold_ratio:.2%}，触发全量重建")
-                return True
-
-        return False
+        Returns:
+            刷新决策枚举值
+        """
+        return self._expiration_manager.get_refresh_decision(
+            is_first_load=(self.buffer_a is None)
+        )
 
     async def _load_incremental_to_buffer_b(self) -> None:
-        """增量加载数据到缓冲区 B（异步）"""
+        """增量加载数据到缓冲区 B（异步）
+        
+        使用 ExpirationManager 管理增量刷新逻辑。
+        """
         async with self.load_lock:
             if self.loading or self._stopped:
                 return
             self.loading = True
         
         try:
-            # 首次加载时执行全量加载
-            with self.buffer_lock:
-                if self.buffer_a is None or self._tracker["last_max_id"] == 0:
-                    logger.info("[JargonCache] 首次加载，执行全量加载...")
-                    async with self.load_lock:
-                        self.loading = False
-                    await self._load_to_buffer_b()
-                    return
-
-            logger.info("[JargonCache] 开始增量加载黑话缓存...")
+            # 获取刷新决策
+            decision = self._get_refresh_decision()
+            
+            # 根据决策执行不同操作
+            if decision == RefreshDecision.FULL_REBUILD:
+                logger.info("[JargonCache] 过期管理器决策：执行全量重建...")
+                async with self.load_lock:
+                    self.loading = False
+                await self._load_to_buffer_b()
+                return
+            
+            if decision == RefreshDecision.SKIP:
+                logger.debug("[JargonCache] 过期管理器决策：跳过刷新")
+                return
+            
+            # 处理删除检测
+            if decision == RefreshDecision.DELETION_CHECK:
+                logger.info("[JargonCache] 过期管理器决策：执行删除检测...")
+                await self._check_deleted_records()
+                return
+            
+            # 增量刷新
+            logger.info("[JargonCache] 过期管理器决策：执行增量刷新...")
             t0 = time.time()
 
             incremental_data: List[Any] = []
-            current_max_id = self._tracker["last_max_id"]
+            current_max_id = self._expiration_manager.get_last_max_id()
 
             # 尝试从数据库加载增量数据
             try:
@@ -360,7 +469,12 @@ class JargonCacheModule:
                 current_max_id = max_id_result or 0
 
                 # 2. 查询增量数据
-                last_max_id = self._tracker["last_max_id"]
+                last_max_id = self._expiration_manager.get_last_max_id()
+
+                # 检查是否可以跳过增量
+                if self._expiration_manager.should_skip_incremental(current_max_id):
+                    logger.debug("[JargonCache] 数据库无新数据，跳过增量刷新")
+                    return
 
                 if current_max_id > last_max_id:
                     offset = 0
@@ -401,28 +515,37 @@ class JargonCacheModule:
             # 3. 合并增量数据
             if incremental_data:
                 await self._merge_incremental_data(incremental_data)
-                self._tracker["incremental_count"] += len(incremental_data)
-                self._tracker["incremental_refresh_count"] += 1
+                # 使用过期管理器记录增量刷新
+                self._expiration_manager.record_incremental_refresh(
+                    new_count=len(incremental_data),
+                    new_max_id=current_max_id,
+                )
+                # 同步更新兼容追踪器
+                self._sync_tracker_from_manager()
 
-            # 4. 更新追踪器
-            self._tracker["last_max_id"] = current_max_id
             self.last_refresh = time.time()
 
             load_time = time.time() - t0
+            state = self._expiration_manager.state
             logger.info(
                 f"[JargonCache] 增量加载完成: {len(incremental_data)} 条新数据, "
-                f"累计增量: {self._tracker['incremental_count']}, 耗时 {load_time:.2f}s"
+                f"累计增量: {state.incremental_count}, 耗时 {load_time:.2f}s"
             )
-
-            # 5. 定期检测删除
-            if self._tracker["incremental_refresh_count"] % self._deletion_check_interval == 0:
-                await self._check_deleted_records()
 
         except Exception as e:
             logger.error(f"[JargonCache] 增量加载失败: {e}")
         finally:
             async with self.load_lock:
                 self.loading = False
+    
+    def _sync_tracker_from_manager(self) -> None:
+        """从 ExpirationManager 同步状态到兼容追踪器"""
+        state = self._expiration_manager.state
+        self._tracker["last_max_id"] = state.last_max_id
+        self._tracker["total_count"] = state.total_count
+        self._tracker["incremental_count"] = state.incremental_count
+        self._tracker["last_full_rebuild"] = state.last_full_rebuild
+        self._tracker["incremental_refresh_count"] = state.incremental_refresh_count
 
     async def _merge_incremental_data(self, incremental_data: List[Any]) -> None:
         """合并增量数据到缓存
@@ -644,11 +767,13 @@ class JargonCacheModule:
                 self.buffer_a, self.buffer_b = self.buffer_b, None
                 self.content_index_a, self.content_index_b = self.content_index_b, None
 
-                # 更新追踪器
-                self._tracker["last_max_id"] = max_id
-                self._tracker["total_count"] = len(buffer_b_data)
-                self._tracker["incremental_count"] = 0
-                self._tracker["last_full_rebuild"] = time.time()
+            # 使用过期管理器记录全量重建
+            self._expiration_manager.record_full_rebuild(
+                total_count=len(buffer_b_data),
+                max_id=max_id,
+            )
+            # 同步更新兼容追踪器
+            self._sync_tracker_from_manager()
             
             self.last_refresh = time.time()
             load_time = time.time() - t0

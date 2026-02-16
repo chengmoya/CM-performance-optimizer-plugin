@@ -312,21 +312,21 @@ class ModuleEnabler:
             config_manager: 配置管理器
         """
         module_enable_paths = {
-            "message_cache": "performance.enable_message_cache",
-            "message_repository_fastpath": "performance.enable_message_repository_fastpath",
-            "person_cache": "performance.enable_person_cache",
-            "expression_cache": "performance.enable_expression_cache",
-            "jargon_cache": "performance.enable_jargon_cache",
-            "jargon_matcher_automaton": "performance.enable_jargon_matcher_automaton",
-            "kg_cache": "performance.enable_kg_cache",
-            "levenshtein_fast": "performance.enable_levenshtein_fast",
-            "image_desc_bulk_lookup": "performance.enable_image_desc_bulk_lookup",
-            "user_reference_batch_resolve": "performance.enable_user_reference_batch_resolve",
-            "regex_precompile": "performance.enable_regex_precompile",
-            "typo_generator_cache": "performance.enable_typo_generator_cache",
-            "lightweight_profiler": "performance.enable_lightweight_profiler",
-            "asyncio_loop_pool": "performance.enable_asyncio_loop_pool",
-            "db_tuning": "performance.enable_db_tuning",
+            "message_cache": "modules.message_cache_enabled",
+            "message_repository_fastpath": "modules.message_repository_fastpath_enabled",
+            "person_cache": "modules.person_cache_enabled",
+            "expression_cache": "modules.expression_cache_enabled",
+            "jargon_cache": "modules.jargon_cache_enabled",
+            "jargon_matcher_automaton": "modules.jargon_matcher_automaton_enabled",
+            "kg_cache": "modules.kg_cache_enabled",
+            "levenshtein_fast": "modules.levenshtein_fast_enabled",
+            "image_desc_bulk_lookup": "modules.image_desc_bulk_lookup_enabled",
+            "user_reference_batch_resolve": "modules.user_reference_batch_resolve_enabled",
+            "regex_precompile": "modules.regex_precompile_enabled",
+            "typo_generator_cache": "modules.typo_generator_cache_enabled",
+            "lightweight_profiler": "modules.lightweight_profiler_enabled",
+            "asyncio_loop_pool": "modules.asyncio_loop_pool_enabled",
+            "db_tuning": "modules.db_tuning_enabled",
         }
 
         for module_name, config_path in module_enable_paths.items():

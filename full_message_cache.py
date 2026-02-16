@@ -565,8 +565,15 @@ class FullMessageCache:
             messages = chat_data["messages"]
             original_len = len(messages)
 
-            # 删除匹配的消息
-            messages[:] = [m for m in messages if getattr(m, "id", None) != message_id]
+            # BUG FIX: 兼容 message_id 和 id 字段
+            # 优先检查 message_id，然后回退到 id
+            def _get_msg_id(m):
+                msg_id = getattr(m, "message_id", None)
+                if msg_id is not None:
+                    return msg_id
+                return getattr(m, "id", None)
+
+            messages[:] = [m for m in messages if _get_msg_id(m) != message_id]
 
             if len(messages) == 0:
                 # 如果chat没有消息了，删除chat
@@ -676,21 +683,33 @@ class FullMessageCache:
                 if len(messages) > self.max_messages_per_chat:
                     messages = messages[-self.max_messages_per_chat:]
 
+                # BUG FIX: 检查 chat 是否已存在，避免重复统计
+                chat_already_exists = chat_id in self.buffer_a
+                old_message_count = 0
+                if chat_already_exists:
+                    old_message_count = len(self.buffer_a[chat_id].get("messages", []))
+
                 self.buffer_a[chat_id] = {
                     "messages": messages,
                     "ts": time.time(),
                 }
                 self.buffer_a.move_to_end(chat_id)
 
-                # 更新统计
+                # 更新统计（只增加增量，避免重复统计）
                 with self._stats_lock:
+                    # 减去旧消息数（如果chat已存在）
+                    if chat_already_exists:
+                        self._total_messages -= old_message_count
+                    else:
+                        # 新增的chat
+                        self._total_chats += 1
+                    # 加上新消息数
                     self._total_messages += len(messages)
-                    self._total_chats += 1
 
                 # LRU淘汰
                 self._evict_if_needed()
 
-            logger.debug(f"[FullCache] 增量加载完成 chat_id={chat_id}, 消息数={len(messages)}")
+            logger.debug(f"[FullCache] 增量加载完成 chat_id={chat_id}, 消息数={len(messages)}, 已存在={chat_already_exists}")
         except Exception as e:
             logger.error(f"[FullCache] 增量加载异常 chat_id={chat_id}: {e}")
 

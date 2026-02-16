@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.0.0] - 2026-02-16
+
+### Added
+- 通知系统（QQ消息 + 控制台）
+  - QQ通知渠道（通过MaiBot发送消息）
+  - 控制台通知渠道
+  - 通知冷却控制（防止频繁发送）
+  - 每日发送限制
+  - 通知去重机制
+- 错误日志通知
+  - 捕获ERROR及以上级别日志
+  - 自动发送到配置的QQ号
+  - 支持堆栈跟踪包含
+  - 错误去重窗口配置
+- 缓存过期机制增强
+  - 增量刷新模式（仅更新变化的数据）
+  - 全量重建模式（完全重新加载）
+  - 可配置的刷新间隔
+- 人物缓存过期模式
+  - 30分钟默认TTL
+  - 最大缓存大小限制
+  - 自动过期清理
+
+### Changed
+- 版本号升级到 6.0.0
+- 插件描述更新，包含通知系统功能
+- 配置文件结构优化，新增通知和过期配置节
+
+### Configuration
+- 新增 `[notification]` 配置节
+- 新增 `[notification.error_log]` 配置节
+- 新增 `[cache_expiration]` 配置节
+- 新增 `[person_cache_expiration]` 配置节
+
 ## [5.2.0] - 2026-02-16
 
 ### Changed

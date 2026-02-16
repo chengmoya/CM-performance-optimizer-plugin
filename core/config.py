@@ -4,7 +4,7 @@
 提供完整的配置系统支持：
 - 扩展 ConfigField 支持 float、嵌套对象等类型
 - 配置验证机制（数值范围、依赖关系）
-- 配置热更新支持
+- 配置修改后重启生效
 - 向后兼容性和配置迁移
 """
 
@@ -87,14 +87,13 @@ class ExtendedConfigField:
     - 嵌套对象
     - 数值范围约束
     - 依赖关系
-    - 热更新标记
+    - 配置修改后重启生效
     """
 
     field_type: ConfigFieldType
     default: Any
     description: str = ""
     constraint: Optional[ConfigConstraint] = None
-    hot_reload: bool = False  # 是否支持热更新
     section: str = "plugin"  # 所属配置节
     order: int = 0  # 显示顺序
     hidden: bool = False  # 是否隐藏（高级配置）
@@ -258,8 +257,15 @@ class ConfigMigrator:
 
     def _register_migrations(self):
         """注册迁移函数"""
-        # 从 1.0.0 迁移到 2.0.0
+        # 版本迁移链：从旧版本到新版本的迁移路径
+        # 注意：中间版本（如 3.0.0, 4.0.0）无破坏性变更，直接兼容
+        # 迁移链按顺序执行，确保配置格式逐步升级
         self._migrations["1.0.0->2.0.0"] = self._migrate_1_0_to_2_0
+        self._migrations["2.0.0->3.0.0"] = self._migrate_2_0_to_3_0
+        self._migrations["3.0.0->4.0.0"] = self._migrate_3_0_to_4_0
+        self._migrations["4.0.0->5.0.0"] = self._migrate_4_0_to_5_0
+        self._migrations["5.0.0->5.1.0"] = self._migrate_5_0_to_5_1
+        self._migrations["5.1.0->5.2.0"] = self._migrate_5_1_to_5_2
 
     def _migrate_1_0_to_2_0(self, config: Dict) -> Dict:
         """从 1.0.0 迁移到 2.0.0"""
@@ -320,6 +326,115 @@ class ConfigMigrator:
 
         return new_config
 
+    def _migrate_2_0_to_3_0(self, config: Dict) -> Dict:
+        """从 2.0.0 迁移到 3.0.0
+        
+        变更说明：
+        - 添加性能监控配置节
+        - 无破坏性变更，仅添加新配置项
+        """
+        new_config = copy.deepcopy(config)
+        
+        if "monitor" not in new_config:
+            new_config["monitor"] = {
+                "enabled": True,
+                "interval": 60,
+                "memory_threshold": 0.8
+            }
+        
+        if "plugin" not in new_config:
+            new_config["plugin"] = {}
+        new_config["plugin"]["config_version"] = "3.0.0"
+        
+        return new_config
+
+    def _migrate_3_0_to_4_0(self, config: Dict) -> Dict:
+        """从 3.0.0 迁移到 4.0.0
+        
+        变更说明：
+        - 添加缓存策略配置
+        - 无破坏性变更，仅添加新配置项
+        """
+        new_config = copy.deepcopy(config)
+        
+        if "strategy" not in new_config:
+            new_config["strategy"] = {
+                "eviction_policy": "lru",
+                "max_memory_percent": 0.7
+            }
+        
+        if "plugin" not in new_config:
+            new_config["plugin"] = {}
+        new_config["plugin"]["config_version"] = "4.0.0"
+        
+        return new_config
+
+    def _migrate_4_0_to_5_0(self, config: Dict) -> Dict:
+        """从 4.0.0 迁移到 5.0.0
+        
+        变更说明：
+        - 重构缓存模块配置结构
+        - 添加高级缓存选项
+        """
+        new_config = copy.deepcopy(config)
+        
+        # 添加高级缓存配置
+        if "cache" in new_config:
+            cache = new_config["cache"]
+            if "advanced" not in cache:
+                cache["advanced"] = {
+                    "compression": False,
+                    "serialization": "pickle"
+                }
+        
+        if "plugin" not in new_config:
+            new_config["plugin"] = {}
+        new_config["plugin"]["config_version"] = "5.0.0"
+        
+        return new_config
+
+    def _migrate_5_0_to_5_1(self, config: Dict) -> Dict:
+        """从 5.0.0 迁移到 5.1.0
+        
+        变更说明：
+        - 添加告警通知配置
+        - 无破坏性变更
+        """
+        new_config = copy.deepcopy(config)
+        
+        if "notification" not in new_config:
+            new_config["notification"] = {
+                "enabled": False,
+                "channels": []
+            }
+        
+        if "plugin" not in new_config:
+            new_config["plugin"] = {}
+        new_config["plugin"]["config_version"] = "5.1.0"
+        
+        return new_config
+
+    def _migrate_5_1_to_5_2(self, config: Dict) -> Dict:
+        """从 5.1.0 迁移到 5.2.0
+        
+        变更说明：
+        - 添加性能分析配置
+        - 无破坏性变更
+        """
+        new_config = copy.deepcopy(config)
+        
+        if "profiling" not in new_config:
+            new_config["profiling"] = {
+                "enabled": False,
+                "sample_rate": 0.1
+            }
+        
+        if "plugin" not in new_config:
+            new_config["plugin"] = {}
+        new_config["plugin"]["config_version"] = "5.2.0"
+        
+        return new_config
+
     def migrate(self, config: Dict) -> Dict:
         """执行配置迁移"""
         current_version = config.get("plugin", {}).get("config_version", "1.0.0")
@@ -329,8 +444,12 @@ class ConfigMigrator:
 
         result = copy.deepcopy(config)
 
-        # 链式迁移
-        version_chain = ["1.0.0", "2.0.0"]
+        # 链式迁移：完整的版本迁移链
+        # 注意：每个版本变更都应在此链中有对应条目
+        # 中间版本若无破坏性变更，迁移函数可为空操作（仅更新版本号）
+        version_chain = [
+            "1.0.0", "2.0.0", "3.0.0", "4.0.0", "5.0.0", "5.1.0", "5.2.0"
+        ]
         start_idx = -1
 
         for i, v in enumerate(version_chain):
@@ -356,9 +475,8 @@ class ConfigManager:
     功能：
     - 配置加载和保存
     - 配置验证
-    - 热更新支持
+    - 配置修改后重启生效
     - 向后兼容性
-    - 配置变更通知
     """
 
     _instance: Optional["ConfigManager"] = None
@@ -381,7 +499,6 @@ class ConfigManager:
         self._config_path = self._plugin_dir / "config.toml"
         self._config: Dict[str, Any] = {}
         self._schema: Dict[str, Dict[str, ExtendedConfigField]] = {}
-        self._listeners: Dict[str, List[Callable[[str, Any, Any], None]]] = {}
         self._migrator = ConfigMigrator()
         self._config_lock = threading.RLock()
 
@@ -394,13 +511,16 @@ class ConfigManager:
             "modules": self._build_modules_schema(),
             "message_cache": self._build_message_cache_schema(),
             "person_cache": self._build_person_cache_schema(),
+            "person_cache_expiration": self._build_person_cache_expiration_schema(),
             "expression_cache": self._build_expression_cache_schema(),
             "jargon_cache": self._build_jargon_cache_schema(),
             "kg_cache": self._build_kg_cache_schema(),
+            "cache_expiration": self._build_cache_expiration_schema(),
             "db_tuning": self._build_db_tuning_schema(),
             "lightweight_profiler": self._build_lightweight_profiler_schema(),
             "advanced": self._build_advanced_schema(),
             "monitoring": self._build_monitoring_schema(),
+            "notification": self._build_notification_schema(),
         }
 
     def _build_plugin_schema(self) -> Dict[str, ExtendedConfigField]:
@@ -430,7 +550,6 @@ class ConfigManager:
                 ),
                 section="plugin",
                 order=2,
-                hot_reload=True,
             ),
             "degraded_mode": ExtendedConfigField(
                 field_type=ConfigFieldType.BOOL,
@@ -560,34 +679,29 @@ class ConfigManager:
                 default=200,
                 description="每个聊天的缓存消息数量",
                 constraint=ConfigConstraint(min_value=50, max_value=1000),
-                hot_reload=True,
             ),
             "ttl": ExtendedConfigField(
                 field_type=ConfigFieldType.INT,
                 default=300,
                 description="缓存过期时间（秒）",
                 constraint=ConfigConstraint(min_value=60, max_value=3600),
-                hot_reload=True,
             ),
             "max_chats": ExtendedConfigField(
                 field_type=ConfigFieldType.INT,
                 default=500,
                 description="最大缓存聊天数",
                 constraint=ConfigConstraint(min_value=100, max_value=2000),
-                hot_reload=True,
             ),
             "ignore_time_limit_when_active": ExtendedConfigField(
                 field_type=ConfigFieldType.BOOL,
                 default=True,
                 description="活跃聊天流忽略TTL限制",
-                hot_reload=True,
             ),
             "active_time_window": ExtendedConfigField(
                 field_type=ConfigFieldType.INT,
                 default=300,
                 description="活跃时间窗口（秒）",
                 constraint=ConfigConstraint(min_value=60, max_value=1800),
-                hot_reload=True,
             ),
             "normalize_lt_window_seconds": ExtendedConfigField(
                 field_type=ConfigFieldType.FLOAT,
@@ -621,48 +735,96 @@ class ConfigManager:
                 default=3000,
                 description="最大缓存条目数",
                 constraint=ConfigConstraint(min_value=500, max_value=10000),
-                hot_reload=True,
             ),
             "ttl": ExtendedConfigField(
                 field_type=ConfigFieldType.INT,
                 default=1800,
                 description="缓存过期时间（秒）",
                 constraint=ConfigConstraint(min_value=300, max_value=7200),
-                hot_reload=True,
             ),
             "warmup_enabled": ExtendedConfigField(
                 field_type=ConfigFieldType.BOOL,
                 default=True,
                 description="启用预热功能",
-                hot_reload=True,
             ),
             "warmup_per_chat_sample": ExtendedConfigField(
                 field_type=ConfigFieldType.INT,
                 default=30,
                 description="预热时每聊天采样消息数",
                 constraint=ConfigConstraint(min_value=10, max_value=100),
-                hot_reload=True,
             ),
             "warmup_max_persons": ExtendedConfigField(
                 field_type=ConfigFieldType.INT,
                 default=20,
                 description="每聊天最多预热人数",
                 constraint=ConfigConstraint(min_value=5, max_value=50),
-                hot_reload=True,
             ),
             "warmup_ttl": ExtendedConfigField(
                 field_type=ConfigFieldType.INT,
                 default=120,
                 description="预热记录过期时间（秒）",
                 constraint=ConfigConstraint(min_value=30, max_value=600),
-                hot_reload=True,
             ),
             "warmup_debounce_seconds": ExtendedConfigField(
                 field_type=ConfigFieldType.FLOAT,
                 default=3.0,
                 description="预热防抖时间（秒）",
                 constraint=ConfigConstraint(min_value=0.5, max_value=10.0),
-                hot_reload=True,
+            ),
+        }
+
+    def _build_person_cache_expiration_schema(self) -> Dict[str, ExtendedConfigField]:
+        """人物缓存过期策略配置 schema
+        
+        配置项：
+        - enabled: 是否启用过期模式
+        - ttl: 缓存过期时间（秒），默认30分钟
+        - max_size: 最大缓存条目数
+        - cleanup_interval: 清理间隔（秒）
+        - warmup_enabled: 是否启用预热
+        - warmup_ttl: 预热记录过期时间
+        - warmup_debounce_seconds: 预热防抖时间
+        """
+        return {
+            "enabled": ExtendedConfigField(
+                field_type=ConfigFieldType.BOOL,
+                default=True,
+                description="启用人物缓存过期模式",
+            ),
+            "ttl": ExtendedConfigField(
+                field_type=ConfigFieldType.INT,
+                default=1800,
+                description="缓存过期时间（秒），默认30分钟",
+                constraint=ConfigConstraint(min_value=300, max_value=7200),
+            ),
+            "max_size": ExtendedConfigField(
+                field_type=ConfigFieldType.INT,
+                default=3000,
+                description="最大缓存条目数",
+                constraint=ConfigConstraint(min_value=500, max_value=10000),
+            ),
+            "cleanup_interval": ExtendedConfigField(
+                field_type=ConfigFieldType.INT,
+                default=60,
+                description="过期清理间隔（秒）",
+                constraint=ConfigConstraint(min_value=30, max_value=300),
+            ),
+            "warmup_enabled": ExtendedConfigField(
+                field_type=ConfigFieldType.BOOL,
+                default=True,
+                description="启用预热功能",
+            ),
+            "warmup_ttl": ExtendedConfigField(
+                field_type=ConfigFieldType.INT,
+                default=120,
+                description="预热记录过期时间（秒）",
+                constraint=ConfigConstraint(min_value=30, max_value=600),
+            ),
+            "warmup_debounce_seconds": ExtendedConfigField(
+                field_type=ConfigFieldType.FLOAT,
+                default=3.0,
+                description="预热防抖时间（秒）",
+                constraint=ConfigConstraint(min_value=0.5, max_value=10.0),
             ),
         }
 
@@ -686,14 +848,12 @@ class ConfigManager:
                 default=3600,
                 description="自动刷新间隔（秒）",
                 constraint=ConfigConstraint(min_value=600, max_value=86400),
-                hot_reload=True,
             ),
             "incremental_refresh_interval": ExtendedConfigField(
                 field_type=ConfigFieldType.INT,
                 default=600,
                 description="增量刷新间隔（秒）",
                 constraint=ConfigConstraint(min_value=60, max_value=3600),
-                hot_reload=True,
             ),
             "incremental_threshold_ratio": ExtendedConfigField(
                 field_type=ConfigFieldType.FLOAT,
@@ -735,7 +895,6 @@ class ConfigManager:
                 default=3600,
                 description="自动刷新间隔（秒）",
                 constraint=ConfigConstraint(min_value=600, max_value=86400),
-                hot_reload=True,
             ),
             "enable_content_index": ExtendedConfigField(
                 field_type=ConfigFieldType.BOOL,
@@ -747,7 +906,6 @@ class ConfigManager:
                 default=600,
                 description="增量刷新间隔（秒）",
                 constraint=ConfigConstraint(min_value=60, max_value=3600),
-                hot_reload=True,
             ),
             "incremental_threshold_ratio": ExtendedConfigField(
                 field_type=ConfigFieldType.FLOAT,
@@ -789,14 +947,12 @@ class ConfigManager:
                 default=3600,
                 description="自动刷新间隔（秒）",
                 constraint=ConfigConstraint(min_value=600, max_value=86400),
-                hot_reload=True,
             ),
             "incremental_refresh_interval": ExtendedConfigField(
                 field_type=ConfigFieldType.INT,
                 default=600,
                 description="增量刷新间隔（秒）",
                 constraint=ConfigConstraint(min_value=60, max_value=3600),
-                hot_reload=True,
             ),
             "incremental_threshold_ratio": ExtendedConfigField(
                 field_type=ConfigFieldType.FLOAT,
@@ -823,6 +979,118 @@ class ConfigManager:
             ),
         }
 
+    def _build_cache_expiration_schema(self) -> Dict[str, ExtendedConfigField]:
+        """缓存过期策略配置 schema
+        
+        统一管理各类缓存的过期策略，包括：
+        - 增量刷新间隔
+        - 全量重建间隔
+        - 增量阈值比例
+        - 删除检测周期
+        """
+        return {
+            # 全局默认配置
+            "default_incremental_refresh_interval": ExtendedConfigField(
+                field_type=ConfigFieldType.INT,
+                default=600,
+                description="默认增量刷新间隔（秒）",
+                constraint=ConfigConstraint(min_value=60, max_value=3600),
+            ),
+            "default_full_rebuild_interval": ExtendedConfigField(
+                field_type=ConfigFieldType.INT,
+                default=86400,
+                description="默认全量重建间隔（秒）",
+                constraint=ConfigConstraint(min_value=3600, max_value=604800),
+            ),
+            "default_incremental_threshold_ratio": ExtendedConfigField(
+                field_type=ConfigFieldType.FLOAT,
+                default=0.1,
+                description="默认触发全量重建的增量比例阈值",
+                constraint=ConfigConstraint(min_value=0.01, max_value=1.0),
+            ),
+            "default_deletion_check_interval": ExtendedConfigField(
+                field_type=ConfigFieldType.INT,
+                default=10,
+                description="默认删除检测间隔（每N次增量刷新）",
+                constraint=ConfigConstraint(min_value=1, max_value=100),
+            ),
+            # slang_cache (黑话缓存) 特定配置
+            "slang_cache_incremental_refresh_interval": ExtendedConfigField(
+                field_type=ConfigFieldType.INT,
+                default=600,
+                description="黑话缓存增量刷新间隔（秒）",
+                constraint=ConfigConstraint(min_value=60, max_value=3600),
+            ),
+            "slang_cache_full_rebuild_interval": ExtendedConfigField(
+                field_type=ConfigFieldType.INT,
+                default=86400,
+                description="黑话缓存全量重建间隔（秒）",
+                constraint=ConfigConstraint(min_value=3600, max_value=604800),
+            ),
+            "slang_cache_incremental_threshold_ratio": ExtendedConfigField(
+                field_type=ConfigFieldType.FLOAT,
+                default=0.1,
+                description="黑话缓存触发全量重建的增量比例阈值",
+                constraint=ConfigConstraint(min_value=0.01, max_value=1.0),
+            ),
+            "slang_cache_deletion_check_interval": ExtendedConfigField(
+                field_type=ConfigFieldType.INT,
+                default=10,
+                description="黑话缓存删除检测间隔（每N次增量刷新）",
+                constraint=ConfigConstraint(min_value=1, max_value=100),
+            ),
+            # knowledge_cache (知识库缓存) 特定配置
+            "knowledge_cache_incremental_refresh_interval": ExtendedConfigField(
+                field_type=ConfigFieldType.INT,
+                default=600,
+                description="知识库缓存增量刷新间隔（秒）",
+                constraint=ConfigConstraint(min_value=60, max_value=3600),
+            ),
+            "knowledge_cache_full_rebuild_interval": ExtendedConfigField(
+                field_type=ConfigFieldType.INT,
+                default=86400,
+                description="知识库缓存全量重建间隔（秒）",
+                constraint=ConfigConstraint(min_value=3600, max_value=604800),
+            ),
+            "knowledge_cache_incremental_threshold_ratio": ExtendedConfigField(
+                field_type=ConfigFieldType.FLOAT,
+                default=0.1,
+                description="知识库缓存触发全量重建的增量比例阈值",
+                constraint=ConfigConstraint(min_value=0.01, max_value=1.0),
+            ),
+            "knowledge_cache_deletion_check_interval": ExtendedConfigField(
+                field_type=ConfigFieldType.INT,
+                default=10,
+                description="知识库缓存删除检测间隔（每N次增量刷新）",
+                constraint=ConfigConstraint(min_value=1, max_value=100),
+            ),
+            # expression_cache (表达式缓存) 特定配置
+            "expression_cache_incremental_refresh_interval": ExtendedConfigField(
+                field_type=ConfigFieldType.INT,
+                default=600,
+                description="表达式缓存增量刷新间隔（秒）",
+                constraint=ConfigConstraint(min_value=60, max_value=3600),
+            ),
+            "expression_cache_full_rebuild_interval": ExtendedConfigField(
+                field_type=ConfigFieldType.INT,
+                default=86400,
+                description="表达式缓存全量重建间隔（秒）",
+                constraint=ConfigConstraint(min_value=3600, max_value=604800),
+            ),
+            "expression_cache_incremental_threshold_ratio": ExtendedConfigField(
+                field_type=ConfigFieldType.FLOAT,
+                default=0.1,
+                description="表达式缓存触发全量重建的增量比例阈值",
+                constraint=ConfigConstraint(min_value=0.01, max_value=1.0),
+            ),
+            "expression_cache_deletion_check_interval": ExtendedConfigField(
+                field_type=ConfigFieldType.INT,
+                default=10,
+                description="表达式缓存删除检测间隔（每N次增量刷新）",
+                constraint=ConfigConstraint(min_value=1, max_value=100),
+            ),
+        }
+
     def _build_db_tuning_schema(self) -> Dict[str, ExtendedConfigField]:
         """数据库调优配置 schema"""
         return {
@@ -831,14 +1099,12 @@ class ConfigManager:
                 default=268435456,
                 description="SQLite mmap_size(字节,0=禁用)",
                 constraint=ConfigConstraint(min_value=0, max_value=2147483647),
-                hot_reload=True,
             ),
             "wal_checkpoint_interval": ExtendedConfigField(
                 field_type=ConfigFieldType.INT,
                 default=300,
                 description="WAL checkpoint周期(秒,0=禁用)",
                 constraint=ConfigConstraint(min_value=0, max_value=86400),
-                hot_reload=True,
             ),
         }
 
@@ -850,7 +1116,6 @@ class ConfigManager:
                 default=0.1,
                 description="采样率(0-1)",
                 constraint=ConfigConstraint(min_value=0.0, max_value=1.0),
-                hot_reload=True,
             ),
         }
 
@@ -886,7 +1151,6 @@ class ConfigManager:
                 constraint=ConfigConstraint(min_value=60, max_value=3600),
                 section="advanced",
                 order=3,
-                hot_reload=True,
             ),
             "enable_hot_reload": ExtendedConfigField(
                 field_type=ConfigFieldType.BOOL,
@@ -928,7 +1192,6 @@ class ConfigManager:
                 constraint=ConfigConstraint(min_value=10, max_value=3600),
                 section="monitoring",
                 order=1,
-                hot_reload=True,
             ),
             "enable_memory_monitor": ExtendedConfigField(
                 field_type=ConfigFieldType.BOOL,
@@ -944,7 +1207,6 @@ class ConfigManager:
                 constraint=ConfigConstraint(min_value=0.1, max_value=1.0),
                 section="monitoring",
                 order=3,
-                hot_reload=True,
             ),
             "memory_critical_threshold": ExtendedConfigField(
                 field_type=ConfigFieldType.FLOAT,
@@ -953,7 +1215,6 @@ class ConfigManager:
                 constraint=ConfigConstraint(min_value=0.1, max_value=1.0),
                 section="monitoring",
                 order=4,
-                hot_reload=True,
             ),
             "enable_health_check": ExtendedConfigField(
                 field_type=ConfigFieldType.BOOL,
@@ -969,6 +1230,30 @@ class ConfigManager:
                 constraint=ConfigConstraint(min_value=10, max_value=300),
                 section="monitoring",
                 order=6,
+            ),
+        }
+
+    def _build_notification_schema(self) -> Dict[str, ExtendedConfigField]:
+        """通知配置 schema
+        
+        简化配置，只在内存占用过高时通知：
+        - enabled: 是否启用通知功能
+        - admin_qq: 管理员QQ号（接收通知）
+        """
+        return {
+            "enabled": ExtendedConfigField(
+                field_type=ConfigFieldType.BOOL,
+                default=True,
+                description="启用通知功能",
+                section="notification",
+                order=0,
+            ),
+            "admin_qq": ExtendedConfigField(
+                field_type=ConfigFieldType.STR,
+                default="",
+                description="接收通知的QQ号（留空则不发送QQ通知）",
+                section="notification",
+                order=1,
             ),
         }
 
@@ -988,13 +1273,228 @@ class ConfigManager:
 
         return config
 
+    def _generate_default_config(self) -> None:
+        """生成默认配置文件
+        
+        当 config.toml 不存在时，自动生成带有详细注释的默认配置文件。
+        生成的配置文件兼容 MaiBot Web 配置管理界面。
+        """
+        from datetime import datetime
+        
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        default_config_content = f'''# =====================================================
+# CM Performance Optimizer Plugin 配置文件
+# 自动生成时间: {timestamp}
+# =====================================================
+
+# ============ 插件基本配置 ============
+[plugin]
+enabled = true                          # 是否启用插件
+config_version = "2.0.0"                # 配置文件版本
+log_level = "INFO"                      # 日志级别 (DEBUG/INFO/WARNING/ERROR/CRITICAL)
+
+# ============ 功能模块开关 ============
+[modules]
+message_cache_enabled = true            # 是否启用消息缓存
+message_repository_fastpath_enabled = true  # 是否启用消息仓库快速路径
+person_cache_enabled = true             # 是否启用人物信息缓存
+expression_cache_enabled = true         # 是否启用表达式缓存
+jargon_cache_enabled = true             # 是否启用黑话缓存
+jargon_matcher_automaton_enabled = true # 是否启用黑话匹配自动机
+kg_cache_enabled = true                 # 是否启用知识图谱缓存
+levenshtein_fast_enabled = true         # 是否启用Levenshtein距离加速
+image_desc_bulk_lookup_enabled = true   # 是否启用图片描述批量查询
+user_reference_batch_resolve_enabled = true  # 是否启用用户引用批量解析
+regex_precompile_enabled = true         # 是否启用正则表达式预编译
+typo_generator_cache_enabled = true     # 是否启用错别字生成器缓存
+db_tuning_enabled = true                # 是否启用SQLite数据库调优
+lightweight_profiler_enabled = false    # 是否启用轻量性能剖析器
+asyncio_loop_pool_enabled = true        # 是否启用异步事件循环池
+
+# ============ 消息缓存配置 ============
+[message_cache]
+per_chat_limit = 200                    # 每个聊天的缓存消息数量 (50-1000)
+ttl = 300                               # 缓存过期时间(秒) (60-3600)
+max_chats = 500                         # 最大缓存聊天数 (100-2000)
+mode = "query"                          # 缓存模式: query=查询模式, full=完整模式
+ignore_time_limit_when_active = true    # 活跃聊天流是否忽略TTL限制
+active_time_window = 300                # 活跃时间窗口(秒) (60-1800)
+bucket_enabled = false                  # 滑动窗口分桶功能（预留）
+bucket_seconds = 5                      # 分桶时间间隔(秒)
+
+# ============ 人物信息缓存配置 ============
+[person_cache]
+max_size = 3000                         # 最大缓存条目数 (500-10000)
+ttl = 1800                              # 缓存过期时间(秒) (300-7200)
+warmup_enabled = true                   # 是否启用预热功能
+warmup_per_chat_sample = 30             # 预热时每聊天采样消息数 (10-100)
+warmup_max_persons = 20                 # 每聊天最多预热人数 (5-50)
+warmup_ttl = 120                        # 预热记录过期时间(秒) (30-600)
+warmup_debounce_seconds = 3.0           # 预热防抖时间(秒) (0.5-10.0)
+
+# ============ 表达式缓存配置 ============
+[expression_cache]
+batch_size = 100                        # 批量处理大小 (50-500)
+batch_delay = 0.05                      # 批量处理延迟(秒) (0.01-0.5)
+refresh_interval = 3600                 # 自动刷新间隔(秒) (600-86400)
+incremental_refresh_interval = 600      # 增量刷新间隔(秒) (60-3600)
+incremental_threshold_ratio = 0.1       # 增量刷新阈值比例 (0.01-1.0)
+full_rebuild_interval = 86400           # 全量重建间隔(秒) (3600-604800)
+deletion_check_interval = 10            # 删除检测间隔(每N次增量刷新) (1-100)
+
+# ============ 黑话缓存配置 ============
+[jargon_cache]
+batch_size = 100                        # 批量处理大小 (50-500)
+batch_delay = 0.05                      # 批量处理延迟(秒) (0.01-0.5)
+refresh_interval = 3600                 # 自动刷新间隔(秒) (600-86400)
+enable_content_index = true             # 是否启用内容索引
+incremental_refresh_interval = 600      # 增量刷新间隔(秒) (60-3600)
+incremental_threshold_ratio = 0.1       # 增量刷新阈值比例 (0.01-1.0)
+full_rebuild_interval = 86400           # 全量重建间隔(秒) (3600-604800)
+deletion_check_interval = 10            # 删除检测间隔(每N次增量刷新) (1-100)
+
+# ============ 知识图谱缓存配置 ============
+[kg_cache]
+batch_size = 100                        # 批量处理大小 (50-500)
+batch_delay = 0.05                      # 批量处理延迟(秒) (0.01-0.5)
+refresh_interval = 3600                 # 自动刷新间隔(秒) (600-86400)
+incremental_refresh_interval = 600      # 增量刷新间隔(秒) (60-3600)
+incremental_threshold_ratio = 0.1       # 增量刷新阈值比例 (0.01-1.0)
+full_rebuild_interval = 86400           # 全量重建间隔(秒) (3600-604800)
+deletion_check_interval = 10            # 删除检测间隔(每N次增量刷新) (1-100)
+use_parquet = true                      # 是否启用Parquet格式存储
+
+# ============ 数据库调优配置 ============
+[db_tuning]
+mmap_size = 268435456                   # SQLite mmap大小(字节) 0=禁用, 默认256MB
+wal_checkpoint_interval = 300           # WAL checkpoint周期(秒) (0-86400) 0=禁用
+
+# ============ 轻量性能剖析配置 ============
+[lightweight_profiler]
+sample_rate = 0.1                       # 采样率 (0.0-1.0)
+
+# ============ 高级配置 ============
+[advanced]
+enable_async_io = true                  # 是否启用异步IO优化
+enable_orjson = true                    # 是否启用orjson加速
+gc_interval = 300                       # 垃圾回收间隔(秒) (60-3600)
+strict_validation = false               # 是否启用严格验证
+enable_change_notifications = true      # 是否启用配置变更通知
+
+# ============ 监控配置 ============
+[monitoring]
+enable_stats = true                     # 是否启用统计功能
+stats_interval = 60                     # 统计报告间隔(秒) (10-3600)
+enable_memory_monitor = true            # 是否启用内存监控
+memory_warning_threshold = 0.8          # 内存警告阈值 (0.1-1.0)
+memory_critical_threshold = 0.9         # 内存严重阈值 (0.1-1.0)
+enable_health_check = true              # 是否启用健康检查
+health_check_interval = 30              # 健康检查间隔(秒) (10-300)
+
+# ============ 通知配置 ============
+[notification]
+enabled = true                          # 是否启用通知功能
+mode = "both"                           # 通知模式: qq(仅QQ) | console(仅控制台) | both(两者)
+qq_target = 0                           # 目标QQ号 (0表示禁用QQ通知)
+qq_level = "warning"                    # QQ通知级别: all | warning | critical | error
+qq_cooldown_seconds = 300.0             # QQ通知冷却时间(秒) (60-3600)
+qq_daily_limit = 50                     # QQ每日发送限制 (1-500)
+performance_warning_enabled = true      # 是否启用性能警告通知
+memory_warning_enabled = true           # 是否启用内存警告通知
+memory_critical_enabled = true          # 是否启用内存严重告警通知
+cache_hit_rate_enabled = false          # 是否启用缓存命中率警告通知
+cache_hit_rate_threshold = 0.5          # 缓存命中率警告阈值 (0.1-0.9)
+
+# ============ 通知配置 - 错误日志 ============
+[notification.error_log]
+enabled = true                          # 是否启用错误日志通知
+level = "error"                         # 日志级别: error | critical
+include_stacktrace = false              # 是否包含堆栈跟踪
+deduplication_window = 600              # 去重窗口(秒) (60-3600)
+
+# ============ 缓存过期配置 ============
+[cache_expiration]
+enabled = true                          # 是否启用缓存过期管理
+
+# 表达式缓存过期配置
+[cache_expiration.expression_cache]
+mode = "incremental"                    # 过期模式: incremental(增量) | full(全量)
+incremental_interval = 600              # 增量刷新间隔(秒) (60-3600)
+full_rebuild_interval = 86400           # 全量重建间隔(秒) (3600-604800)
+
+# 黑话缓存过期配置
+[cache_expiration.jargon_cache]
+mode = "incremental"                    # 过期模式: incremental(增量) | full(全量)
+incremental_interval = 600              # 增量刷新间隔(秒) (60-3600)
+full_rebuild_interval = 86400           # 全量重建间隔(秒) (3600-604800)
+
+# 知识图谱缓存过期配置
+[cache_expiration.kg_cache]
+mode = "incremental"                    # 过期模式: incremental(增量) | full(全量)
+incremental_interval = 600              # 增量刷新间隔(秒) (60-3600)
+full_rebuild_interval = 86400           # 全量重建间隔(秒) (3600-604800)
+
+# ============ 人物缓存过期配置 ============
+[person_cache_expiration]
+enabled = true                          # 是否启用人物缓存过期
+ttl = 1800                              # 过期时间(秒) (300-7200)
+max_size = 3000                         # 最大缓存大��� (500-10000)
+
+# =====================================================
+# 使用说明：
+#
+# 模块开关说明：
+# - 所有模块开关在 [modules] 节中配置
+# - 开关命名规则: xxx_enabled (后缀形式)
+# - 设置为 false 将完全禁用对应模块的功能
+#
+# 缓存模块说明：
+# - message_cache: 消息热集缓存，加速消息查询
+# - person_cache: 人物信息缓存，加速人物属性获取
+# - expression_cache: 表达式缓存，加速表达式解析
+# - jargon_cache: 黑话缓存，加速黑话匹配
+# - kg_cache: 知识图谱缓存，加速知识查询
+#
+# 通知系统说明：
+# - notification.enabled: 全局通知开关
+# - notification.admin_qq: 接收通知的QQ号
+#   - 填写你的QQ号，插件会在内存占用过高时通过私聊发送通知
+#   - 留空或不填写则不发送QQ通知
+#
+# 缓存过期配置说明：
+# - cache_expiration: 缓存过期管理
+#   - mode: 过期模式
+#     - incremental: 增量刷新，仅更新变化的数据
+#     - full: 全量重建，完全重新加载缓存
+# - person_cache_expiration: 人物缓存专用过期配置
+#   - ttl: 缓存条目过期时间
+#   - max_size: 最大缓存条目数
+#
+# 性能调优建议：
+# - 内存充足时: 增大 per_chat_limit、max_size 等缓存参数
+# - 内存紧张时: 减小缓存参数，降低 ttl 值
+# - 高频使用场景: 启用 warmup 预热功能
+# - 调试场景: 启用 lightweight_profiler 进行性能分析
+#
+# =====================================================
+'''
+        
+        try:
+            with open(self._config_path, 'w', encoding='utf-8') as f:
+                f.write(default_config_content)
+            logger.info(f"[Config] 已生成默认配置文件: {self._config_path}")
+        except Exception as e:
+            logger.error(f"[Config] 生成默认配置文件失败: {e}")
+
     def load(self) -> Dict[str, Any]:
         """加载配置文件"""
         with self._config_lock:
             default_config = self.get_default_config()
 
             if not self._config_path.exists():
-                logger.info("[Config] 配置文件不存在，使用默认配置")
+                logger.info("[Config] 配置文件不存在，自动生成默认配置文件")
+                self._generate_default_config()
                 self._config = default_config
                 return copy.deepcopy(self._config)
 
@@ -1094,13 +1594,12 @@ class ConfigManager:
                     return default
             return current
 
-    def set(self, path: str, value: Any, notify: bool = True) -> bool:
-        """设置配置值
+    def set(self, path: str, value: Any) -> bool:
+        """设置配置值（修改后需重启生效）
 
         Args:
             path: 配置路径
             value: 新值
-            notify: 是否通知监听器
 
         Returns:
             是否设置成功
@@ -1126,9 +1625,7 @@ class ConfigManager:
                 logger.warning(f"[Config] 配置验证失败 {path}: {error}")
                 return False
 
-            # 检查是否支持热更新
-            if not field_def.hot_reload:
-                logger.warning(f"[Config] 配置项 {path} 不支持热更新，需要重启生效")
+            logger.warning(f"[Config] 配置项 {path} 已修改，重启后生效")
 
             # 设置值
             old_value = self.get(path)
@@ -1138,10 +1635,6 @@ class ConfigManager:
                     current[part] = {}
                 current = current[part]
             current[parts[-1]] = value
-
-            # 通知监听器
-            if notify and old_value != value:
-                self._notify_listeners(path, old_value, value)
 
             return True
 
@@ -1172,56 +1665,6 @@ class ConfigManager:
 
         return field_def
 
-    def add_listener(self, path: str, callback: Callable[[str, Any, Any], None]):
-        """添加配置变更监听器
-
-        Args:
-            path: 监听的配置路径（支持通配符 "*"）
-            callback: 回调函数 (path, old_value, new_value)
-        """
-        if path not in self._listeners:
-            self._listeners[path] = []
-        self._listeners[path].append(callback)
-
-    def remove_listener(self, path: str, callback: Callable[[str, Any, Any], None]):
-        """移除配置变更监听器"""
-        if path in self._listeners and callback in self._listeners[path]:
-            self._listeners[path].remove(callback)
-
-    def _notify_listeners(self, path: str, old_value: Any, new_value: Any):
-        """通知监听器"""
-        # 精确匹配
-        if path in self._listeners:
-            for callback in self._listeners[path]:
-                try:
-                    callback(path, old_value, new_value)
-                except Exception as e:
-                    logger.error(f"[Config] 监听器回调失败: {e}")
-
-        # 通配符匹配
-        for pattern, callbacks in self._listeners.items():
-            if pattern == "*" or (pattern.endswith(".*") and path.startswith(pattern[:-2])):
-                for callback in callbacks:
-                    try:
-                        callback(path, old_value, new_value)
-                    except Exception as e:
-                        logger.error(f"[Config] 监听器回调失败: {e}")
-
-    def get_hot_reload_fields(self) -> List[str]:
-        """获取所有支持热更新的配置项路径"""
-        fields = []
-
-        for section_name, section_schema in self._schema.items():
-            for field_name, field_def in section_schema.items():
-                if field_def.hot_reload:
-                    fields.append(f"{section_name}.{field_name}")
-
-                if field_def.nested_schema:
-                    for nested_name, nested_def in field_def.nested_schema.items():
-                        if nested_def.hot_reload:
-                            fields.append(f"{section_name}.{field_name}.{nested_name}")
-
-        return fields
 
     def get_schema(self) -> Dict[str, Dict[str, ExtendedConfigField]]:
         """获取完整 schema"""
@@ -1233,16 +1676,15 @@ class ConfigManager:
             return copy.deepcopy(self._config)
 
     def reset_to_default(self, path: Optional[str] = None):
-        """重置配置为默认值
+        """重置配置为默认值（修改后需重启生效）
 
         Args:
             path: 指定路径重置，None 表示全部重置
         """
         with self._config_lock:
             if path is None:
-                old_config = copy.deepcopy(self._config)
                 self._config = self.get_default_config()
-                self._notify_listeners("*", old_config, self._config)
+                logger.warning("[Config] 配置已重置为默认值，重启后生效")
             else:
                 field_def = self._get_field_def(path)
                 if field_def:

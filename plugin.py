@@ -1,5 +1,5 @@
 """
-CM 性能优化插件 v5.2.0
+CM 性能优化插件 v6.0.0
 
 功能模块：
 1. 消息缓存 (message_cache) - 缓存 find_messages 查询结果
@@ -13,6 +13,12 @@ CM 性能优化插件 v5.2.0
 - 向后兼容旧版本配置
 - 详细的模块配置选项
 
+通知系统：
+- QQ消息通知渠道
+- 控制台通知渠道
+- 错误日志通知
+- 性能警告通知
+
 安装：将目录放入 MaiBot/plugins/ 下，重启 MaiBot
 依赖：无额外依赖（可选：aiofiles, orjson, psutil）
 """
@@ -24,8 +30,6 @@ import asyncio
 import time
 import threading
 import importlib.util
-import json
-import os
 from pathlib import Path
 from typing import Optional, Dict, Any, Tuple, List, Union
 
@@ -107,7 +111,7 @@ except ImportError:
 logger = get_logger("CM_perf_opt")
 
 PLUGIN_NAME = "CM-performance-optimizer"
-PLUGIN_VERSION = "5.2.0"
+PLUGIN_VERSION = "6.0.0"
 
 # 全局变量，用于存储动态加载的模块
 _global_modules: Dict[str, Any] = {}
@@ -159,17 +163,33 @@ class _CacheManager:
         self.caches: Dict[str, Any] = {}
         self.logger = logger
 
-    def register_cache(self, name: str, cache_instance: Any):
-        """注册缓存实例"""
+    def register_cache(self, name: str, cache_instance: Any) -> None:
+        """注册缓存实例。
+        
+        Args:
+            name: 缓存名称，用于后续检索
+            cache_instance: 缓存实例对象
+        """
         self.caches[name] = cache_instance
         self.logger.debug(f"[CacheManager] 注册缓存: {name}")
 
     def get_cache(self, name: str) -> Optional[Any]:
-        """获取缓存实例"""
+        """获取缓存实例。
+        
+        Args:
+            name: 缓存名称
+            
+        Returns:
+            缓存实例，若不存在则返回 None
+        """
         return self.caches.get(name)
 
-    def clear_all(self):
-        """清除所有缓存"""
+    def clear_all(self) -> None:
+        """清除所有缓存。
+        
+        遍历所有已注册的缓存实例，调用其 clear() 方法清空缓存数据，
+        最后清空缓存注册表。
+        """
         for name, cache in self.caches.items():
             try:
                 if hasattr(cache, "clear"):
@@ -179,8 +199,12 @@ class _CacheManager:
                 self.logger.error(f"[CacheManager] 清除缓存 {name} 失败: {e}")
         self.caches.clear()
 
-    def stop_all(self):
-        """停止所有缓存"""
+    def stop_all(self) -> None:
+        """停止所有缓存。
+        
+        遍历所有已注册的缓存实例，调用其 stop() 方法停止后台任务，
+        释放相关资源。
+        """
         for name, cache in self.caches.items():
             try:
                 if hasattr(cache, "stop"):
@@ -288,8 +312,11 @@ class _PerformanceOptimizer:
         self._config_manager = None
         self._memory_monitor = None
         self._stats_reporter = None
-        self._module_mapper = None
         self._module_enabler = None
+
+        # 通知系统组件（延迟初始化）
+        self._notification_manager = None
+        self._log_handler = None
 
     def set_plugin_instance(self, plugin_instance: "CMPerformanceOptimizerPlugin"):
         """设置插件实例引用"""
@@ -302,7 +329,6 @@ class _PerformanceOptimizer:
                 get_config_manager,
                 get_memory_monitor,
                 get_stats_reporter,
-                get_module_mapper,
                 get_module_enabler,
             )
 
@@ -312,21 +338,132 @@ class _PerformanceOptimizer:
 
             self._memory_monitor = get_memory_monitor()
             self._stats_reporter = get_stats_reporter()
-            self._module_mapper = get_module_mapper()
             self._module_enabler = get_module_enabler()
-
-            # 注册配置变更监听器
-            self._config_manager.add_listener("*", self._on_config_change)
 
             self.logger.info("[PerfOpt] ✓ 配置系统初始化完成")
         except Exception as e:
             self.logger.warning(f"[PerfOpt] 配置系统初始化失败，使用默认配置: {e}")
 
-    def _on_config_change(self, path: str, old_value: Any, new_value: Any):
-        """配置变更回调"""
-        if self._module_mapper:
-            self._module_mapper.on_config_change(path, old_value, new_value)
-        self.logger.debug(f"[PerfOpt] 配置变更: {path} = {new_value}")
+    def _init_notification_system(self):
+        """初始化通知系统（简化版：只在内存占用过高时通知）"""
+        try:
+            from .core import (
+                NotificationConfig,
+                get_notification_manager,
+                init_notification_manager,
+            )
+
+            # 读取通知配置（简化版）
+            notification_enabled = True
+            admin_qq = ""
+
+            if self._config_manager:
+                notification_enabled = self._config_manager.get("notification.enabled", True)
+                admin_qq = self._config_manager.get("notification.admin_qq", "")
+
+            # 解析QQ号（支持字符串或整数）
+            qq_target = 0
+            if admin_qq:
+                try:
+                    qq_target = int(str(admin_qq).strip())
+                except (ValueError, TypeError):
+                    qq_target = 0
+
+            # 创建通知配置（简化版）
+            notification_config = NotificationConfig(
+                enabled=notification_enabled,
+                mode="qq" if qq_target > 0 else "console",
+                qq_target=qq_target,
+                qq_level="warning",
+                qq_cooldown_seconds=300.0,
+                qq_daily_limit=50,
+                performance_warning_enabled=True,
+                memory_warning_enabled=True,
+                memory_critical_enabled=True,
+            )
+
+            # 初始化通知管理器
+            self._notification_manager = init_notification_manager(notification_config)
+
+            # 尝试设置 Bot 实例
+            self._try_set_bot_instance()
+
+            if qq_target > 0:
+                self.logger.info(f"[PerfOpt] ✓ 通知系统初始化完成，QQ: {qq_target}")
+            else:
+                self.logger.info("[PerfOpt] ✓ 通知系统初始化完成（仅控制台模式）")
+
+        except Exception as e:
+            self.logger.warning(f"[PerfOpt] 通知系统初始化失败: {e}")
+
+    def _try_set_bot_instance(self):
+        """尝试设置 Bot 实例到通知管理器"""
+        if not self._notification_manager:
+            return
+
+        try:
+            # 尝试从不同来源获取 Bot 实例
+            bot_instance = None
+
+            # 方式1: 从全局变量获取
+            try:
+                from src.core.bot import bot
+                bot_instance = bot
+            except ImportError:
+                pass
+
+            # 方式2: 从插件实例获取
+            if bot_instance is None and self.plugin_instance:
+                try:
+                    bot_instance = getattr(self.plugin_instance, "_bot", None)
+                except Exception:
+                    pass
+
+            if bot_instance:
+                self._notification_manager.set_bot_instance(bot_instance)
+                self.logger.info("[PerfOpt] ✓ Bot 实例已设置到通知管理器")
+
+        except Exception as e:
+            self.logger.debug(f"[PerfOpt] 设置 Bot 实例失败（稍后重试）: {e}")
+
+    def _reload_notification_config(self):
+        """重载通知系统配置（简化版）"""
+        if not self._config_manager or not self._notification_manager:
+            return
+
+        try:
+            from .core import NotificationConfig
+
+            # 读取简化配置
+            notification_enabled = self._config_manager.get("notification.enabled", True)
+            admin_qq = self._config_manager.get("notification.admin_qq", "")
+
+            # 解析QQ号
+            qq_target = 0
+            if admin_qq:
+                try:
+                    qq_target = int(str(admin_qq).strip())
+                except (ValueError, TypeError):
+                    qq_target = 0
+
+            # 创建通知配置
+            notification_config = NotificationConfig(
+                enabled=notification_enabled,
+                mode="qq" if qq_target > 0 else "console",
+                qq_target=qq_target,
+                qq_level="warning",
+                qq_cooldown_seconds=300.0,
+                qq_daily_limit=50,
+                performance_warning_enabled=True,
+                memory_warning_enabled=True,
+                memory_critical_enabled=True,
+            )
+
+            self._notification_manager.set_config(notification_config)
+            self.logger.info("[PerfOpt] ✓ 通知系统配置已重载")
+
+        except Exception as e:
+            self.logger.warning(f"[PerfOpt] 通知系统配置重载失败: {e}")
 
     def _register_cache_memory_callbacks(self):
         """注册缓存内存监控回调"""
@@ -776,11 +913,6 @@ class _PerformanceOptimizer:
             else:
                 self.logger.info("[PerfOpt] asyncio_loop_pool 已禁用（默认关闭）")
  
-            # 注册模块到配置映射器
-            if self._module_mapper:
-                for name, cache in self.cache_manager.caches.items():
-                    self._module_mapper.register_module(name, cache)
-
             # PatchChain 摘要日志（展示冲突链）
             if hasattr(self, "_patch_chain") and self._patch_chain is not None:
                 try:
@@ -855,6 +987,9 @@ class _PerformanceOptimizer:
                 except Exception as e:
                     self.logger.warning(f"[PerfOpt] 统计报告启动失败: {e}")
 
+            # 初始化通知系统
+            self._init_notification_system()
+
             self.started = True
             self._log_startup_info()
             self.logger.info("[PerfOpt] ✓ 性能优化器启动完成")
@@ -889,6 +1024,15 @@ class _PerformanceOptimizer:
                 self._memory_monitor.stop()
             if self._stats_reporter:
                 self._stats_reporter.stop()
+
+            # 关闭日志处理器
+            if self._log_handler:
+                try:
+                    from .core import shutdown_log_handler
+                    shutdown_log_handler()
+                    self.logger.debug("[PerfOpt] 日志处理器已关闭")
+                except Exception as e:
+                    self.logger.warning(f"[PerfOpt] 关闭日志处理器失败: {e}")
 
             # 停止所有缓存
             self.cache_manager.stop_all()
@@ -1051,6 +1195,13 @@ class CMPerformanceOptimizerPlugin(BasePlugin):
             collapsed=True,
             order=10,
         ),
+        "notification": ConfigSection(
+            title="通知设置",
+            description="QQ通知和控制台通知配置",
+            icon="🔔",
+            collapsed=True,
+            order=11,
+        ),
     }
 
     # 布局配置 - 使用标签页布局
@@ -1133,6 +1284,13 @@ class CMPerformanceOptimizerPlugin(BasePlugin):
                 icon="📊",
                 sections=["monitoring"],
                 order=10,
+            ),
+            ConfigTab(
+                id="notification",
+                title="通知",
+                icon="🔔",
+                sections=["notification"],
+                order=11,
             ),
         ],
     )
@@ -1351,9 +1509,6 @@ class CMPerformanceOptimizerPlugin(BasePlugin):
             "enable_orjson": ConfigField(
                 type=bool, default=True, description="是否启用orjson"
             ),
-            "gc_interval": ConfigField(
-                type=int, default=300, description="垃圾回收间隔(秒)"
-            ),
             "enable_hot_reload": ConfigField(
                 type=bool, default=True, description="是否启用配置热重载"
             ),
@@ -1385,6 +1540,14 @@ class CMPerformanceOptimizerPlugin(BasePlugin):
             ),
             "health_check_interval": ConfigField(
                 type=int, default=30, description="健康检查间隔(秒) (10-300)"
+            ),
+        },
+        "notification": {
+            "enabled": ConfigField(
+                type=bool, default=True, description="启用通知功能"
+            ),
+            "admin_qq": ConfigField(
+                type=str, default="", description="接收通知的QQ号（留空则不发送QQ通知）"
             ),
         },
     }
@@ -1554,7 +1717,10 @@ class CMPerformanceOptimizerPlugin(BasePlugin):
         return self._degraded, self._degraded_reason
 
     async def reload_config(self) -> bool:
-        """重新加载配置（支持热更新）
+        """重新加载配置（需重启生效）
+
+        注意：配置修改后需要重启 MaiBot 才能生效。
+        此方法仅用于测试配置加载是否正常。
 
         Returns:
             是否重载成功
@@ -1562,10 +1728,10 @@ class CMPerformanceOptimizerPlugin(BasePlugin):
         if self._opt and self._opt._config_manager:
             try:
                 self._opt._config_manager.load()
-                logger.info("[PerfOpt] ✓ 配置已重新加载")
+                logger.warning("[PerfOpt] 配置已重新加载，重启后生效")
                 return True
             except Exception as e:
-                logger.error(f"[PerfOpt] 配置重载失败: {e}")
+                logger.error(f"[PerfOpt] 配置加载失败: {e}")
                 return False
         return False
 

@@ -9,13 +9,26 @@ import threading
 from collections import OrderedDict
 from typing import Optional, Dict, Any, Tuple
 
+# ========== 常量定义 ==========
+# 内存单位转换常量
+BYTES_PER_KB = 1024
+BYTES_PER_MB = 1024 * 1024
+
 
 class MemoryUtils:
     """内存测量工具类 - 递归计算对象的内存占用"""
     
     @staticmethod
-    def get_size(obj, seen=None):
-        """递归计算对象的内存占用（字节）"""
+    def get_size(obj: Any, seen: Optional[set] = None) -> int:
+        """递归计算对象的内存占用（字节）。
+        
+        Args:
+            obj: 要计算内存占用的对象
+            seen: 已访问对象的 ID 集合，用于防止循环引用
+            
+        Returns:
+            对象的内存占用字节数
+        """
         if seen is None:
             seen = set()
         
@@ -37,14 +50,21 @@ class MemoryUtils:
         return size
     
     @staticmethod
-    def format_size(bytes_size):
-        """将字节转换为易读的格式"""
-        if bytes_size < 1024:
+    def format_size(bytes_size: int) -> str:
+        """将字节转换为易读的格式。
+        
+        Args:
+            bytes_size: 字节数
+            
+        Returns:
+            易读的内存大小字符串（如 "1.50 KB"）
+        """
+        if bytes_size < BYTES_PER_KB:
             return f"{bytes_size:.2f} B"
-        elif bytes_size < 1024 * 1024:
-            return f"{bytes_size / 1024:.2f} KB"
+        elif bytes_size < BYTES_PER_MB:
+            return f"{bytes_size / BYTES_PER_KB:.2f} KB"
         else:
-            return f"{bytes_size / (1024 * 1024):.2f} MB"
+            return f"{bytes_size / BYTES_PER_MB:.2f} MB"
 
 
 class TTLCache:
@@ -171,8 +191,9 @@ class TTLCache:
         await asyncio.to_thread(self.clear_sync)
     
     def size(self) -> int:
-        """获取缓存大小"""
-        return len(self.data)
+        """获取缓存大小（线程安全）"""
+        with self._lock:
+            return len(self.data)
     
     async def get_memory_usage(self) -> int:
         """异步获取缓存内存使用量（字节）"""

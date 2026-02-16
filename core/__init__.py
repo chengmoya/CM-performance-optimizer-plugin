@@ -1,4 +1,4 @@
-"""核心模块 - 缓存、工具类、配置、监控和 PatchChain"""
+"""核心模块 - 缓存、工具类、配置、监控、PatchChain、过期管理、通知和日志处理器"""
 
 from .cache import TTLCache, MemoryUtils
 from .utils import ModuleStats, rate, ChatVersionTracker
@@ -29,6 +29,43 @@ from .module_config import (
     ModuleEnabler,
     get_module_mapper,
     get_module_enabler,
+)
+from .expiration import (
+    RefreshDecision,
+    ExpirationConfig,
+    ExpirationState,
+    ExpirationManager,
+    DatabaseExpirationManager,
+    FileExpirationManager,
+    CompositeExpirationManager,
+    create_default_expiration_config,
+    create_expiration_manager,
+)
+from .notification import (
+    NotificationConfig,
+    NotificationManager,
+    NotificationRecord,
+    NOTIFICATION_TEMPLATES,
+    get_notification_manager,
+    init_notification_manager,
+)
+from .logging_handler import (
+    ErrorLogConfig,
+    NotificationLogHandler,
+    get_log_handler,
+    init_log_handler,
+    shutdown_log_handler,
+)
+from .compat import (
+    load_core_module,
+    validate_file_path,
+    validate_json_schema,
+    safe_load_json_file,
+    PARAGRAPH_HASH_SCHEMA,
+    ENTITY_COUNT_SCHEMA,
+    CoreModuleLoadError,
+    PathTraversalError,
+    JsonValidationError,
 )
 
 __all__ = [
@@ -66,4 +103,37 @@ __all__ = [
     "ModuleEnabler",
     "get_module_mapper",
     "get_module_enabler",
+    # 过期管理
+    "RefreshDecision",
+    "ExpirationConfig",
+    "ExpirationState",
+    "ExpirationManager",
+    "DatabaseExpirationManager",
+    "FileExpirationManager",
+    "CompositeExpirationManager",
+    "create_default_expiration_config",
+    "create_expiration_manager",
+    # 通知
+    "NotificationConfig",
+    "NotificationManager",
+    "NotificationRecord",
+    "NOTIFICATION_TEMPLATES",
+    "get_notification_manager",
+    "init_notification_manager",
+    # 日志处理器
+    "ErrorLogConfig",
+    "NotificationLogHandler",
+    "get_log_handler",
+    "init_log_handler",
+    "shutdown_log_handler",
+    # 兼容性模块
+    "load_core_module",
+    "validate_file_path",
+    "validate_json_schema",
+    "safe_load_json_file",
+    "PARAGRAPH_HASH_SCHEMA",
+    "ENTITY_COUNT_SCHEMA",
+    "CoreModuleLoadError",
+    "PathTraversalError",
+    "JsonValidationError",
 ]

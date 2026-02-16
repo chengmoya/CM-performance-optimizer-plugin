@@ -6,6 +6,7 @@
 - 性能指标收集
 - 扩展的统计报告格式
 - 告警机制
+- 通知集成（QQ/控制台）
 """
 
 from __future__ import annotations
@@ -17,7 +18,10 @@ import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
+
+if TYPE_CHECKING:
+    from .notification import NotificationManager, NotificationConfig
 
 try:
     import psutil
@@ -37,6 +41,15 @@ except ImportError:
 
 
 logger = get_logger("CM_perf_opt")
+
+# ========== 常量定义 ==========
+# 内存单位转换常量
+BYTES_PER_KB = 1024
+BYTES_PER_MB = 1024 * 1024
+
+# Python 内存块估算：sys.getallocatedblocks() 返回已分配内存块数量
+# 每块约 64 字节（CPython 默认对齐大小，实际可能因对象类型而异）
+ALLOC_BLOCK_SIZE = 64
 
 
 @dataclass
@@ -60,12 +73,12 @@ class MemorySnapshot:
         return {
             "timestamp": self.timestamp,
             "datetime": datetime.fromtimestamp(self.timestamp).isoformat(),
-            "process_rss_mb": round(self.process_rss / (1024 * 1024), 2),
-            "process_vms_mb": round(self.process_vms / (1024 * 1024), 2),
-            "python_allocated_mb": round(self.python_allocated / (1024 * 1024), 2),
+            "process_rss_mb": round(self.process_rss / BYTES_PER_MB, 2),
+            "process_vms_mb": round(self.process_vms / BYTES_PER_MB, 2),
+            "python_allocated_mb": round(self.python_allocated / BYTES_PER_MB, 2),
             "gc_counts": list(self.gc_counts),
-            "cache_memory": {k: round(v / (1024 * 1024), 2) for k, v in self.cache_memory.items()},
-            "total_cache_memory_mb": round(self.total_cache_memory / (1024 * 1024), 2),
+            "cache_memory": {k: round(v / BYTES_PER_MB, 2) for k, v in self.cache_memory.items()},
+            "total_cache_memory_mb": round(self.total_cache_memory / BYTES_PER_MB, 2),
         }
 
 
@@ -102,6 +115,7 @@ class MemoryMonitor:
     - 定期采集内存快照
     - 内存阈值告警
     - 自动 GC 触发
+    - 通知集成（QQ/控制台）
     """
 
     def __init__(
@@ -110,6 +124,7 @@ class MemoryMonitor:
         critical_threshold: float = 0.9,
         check_interval: float = 30.0,
         history_size: int = 100,
+        notification_manager: Optional["NotificationManager"] = None,
     ):
         self.warning_threshold = warning_threshold
         self.critical_threshold = critical_threshold
@@ -126,6 +141,9 @@ class MemoryMonitor:
         self._last_warning_time: float = 0
         self._last_critical_time: float = 0
         self._warning_cooldown: float = 60.0  # 告警冷却时间
+
+        # 通知管理器
+        self._notification_manager = notification_manager
 
     def register_cache_memory_callback(self, name: str, callback: Callable[[], int]):
         """注册缓存内存获取回调
@@ -160,7 +178,7 @@ class MemoryMonitor:
 
         # Python 分配的内存（通过 sys.getallocatedblocks 估算）
         try:
-            python_allocated = sys.getallocatedblocks() * 64  # 粗略估算
+            python_allocated = sys.getallocatedblocks() * ALLOC_BLOCK_SIZE
         except Exception:
             python_allocated = 0
 
@@ -238,15 +256,57 @@ class MemoryMonitor:
                         # 触发 GC
                         gc.collect()
                         logger.info("[MemMonitor] 已触发垃圾回收")
+                        # 发送严重告警通知
+                        await self._send_critical_notification()
                 elif warning:
                     if now - self._last_warning_time > self._warning_cooldown:
                         logger.warning(f"[MemMonitor] {message}")
                         self._last_warning_time = now
+                        # 发送警告通知
+                        await self._send_warning_notification()
 
             except Exception as e:
                 logger.error(f"[MemMonitor] 监控循环错误: {e}")
 
             await asyncio.sleep(self.check_interval)
+
+    def set_notification_manager(self, notification_manager: "NotificationManager"):
+        """设置通知管理器
+
+        Args:
+            notification_manager: 通知管理器实例
+        """
+        self._notification_manager = notification_manager
+
+    async def _send_warning_notification(self):
+        """发送内存警告通知"""
+        if self._notification_manager is None:
+            return
+
+        try:
+            ratio = self.get_memory_usage_ratio()
+            await self._notification_manager.send(
+                template_key="memory_warning",
+                memory_percent=ratio * 100,
+                threshold=self.warning_threshold * 100,
+            )
+        except Exception as e:
+            logger.error(f"[MemMonitor] 发送警告通知失败: {e}")
+
+    async def _send_critical_notification(self):
+        """发送内存严重告警通知"""
+        if self._notification_manager is None:
+            return
+
+        try:
+            ratio = self.get_memory_usage_ratio()
+            await self._notification_manager.send(
+                template_key="memory_critical",
+                memory_percent=ratio * 100,
+                threshold=self.critical_threshold * 100,
+            )
+        except Exception as e:
+            logger.error(f"[MemMonitor] 发送严重告警通知失败: {e}")
 
     def start(self):
         """启动监控"""

@@ -4,12 +4,13 @@
 采用动态导入 core 模块，避免相对导入问题。
 支持可选依赖的优雅降级（pandas, pyarrow, quick-algo）。
 支持文件变更检测，避免无意义的重复加载。
+集成 ExpirationManager 统一过期策略管理。
+安全增强：路径遍历防护、JSON Schema 验证。
 """
 
 from __future__ import annotations
 
 import asyncio
-import importlib.util
 import json
 import os
 import sys
@@ -62,11 +63,11 @@ CACHE_OPTIONAL_DEPENDENCIES: tuple[str, ...] = ("aiofiles",)
 
 
 def _get_missing_required_cache_deps() -> List[str]:
-    """获取“启用 KGCache 预加载/命中”所需的缺失依赖。
+    """获取"启用 KGCache 预加载/命中"所需的缺失依赖。
 
     约定：
     - 必需依赖仅包含：quick-algo
-    - pandas/pyarrow 仅用于 parquet 加速读取；缺失时允许回退到“从图重建元数据”路径
+    - pandas/pyarrow 仅用于 parquet 加速读取；缺失时允许回退到"从图重建元数据"路径
     """
 
     missing: List[str] = []
@@ -109,54 +110,125 @@ except ImportError:
 logger = get_logger("CM_perf_opt")
 
 
-def _load_core_module():
-    """动态加载 core 模块，避免相对导入问题"""
-    module_name = "CM_perf_opt_core"
-    if module_name in sys.modules:
-        return sys.modules[module_name]
+# 从公共模块导入动态加载函数和安全验证
+try:
+    from core.compat import (
+        load_core_module,
+        validate_file_path,
+        validate_json_schema,
+        safe_load_json_file,
+        PARAGRAPH_HASH_SCHEMA,
+        CoreModuleLoadError,
+        PathTraversalError,
+        JsonValidationError,
+    )
+except ImportError:
+    # 回退定义
+    import importlib.util
     
-    # 定位 core 目录
-    current_dir = Path(__file__).parent
-    plugin_dir = current_dir.parent.parent  # components/modules -> components -> plugin root
-    core_init = plugin_dir / "core" / "__init__.py"
+    def load_core_module(caller_path=None, module_name="CM_perf_opt_core", submodules=None):
+        """Fallback load_core_module 实现"""
+        module_name = "CM_perf_opt_core"
+        if module_name in sys.modules:
+            return sys.modules[module_name]
+        
+        current_dir = Path(__file__).parent
+        plugin_dir = current_dir.parent.parent
+        core_init = plugin_dir / "core" / "__init__.py"
+        
+        if not core_init.exists():
+            raise ImportError(f"Core module not found at {core_init}")
+        
+        spec = importlib.util.spec_from_file_location(module_name, core_init)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"Failed to load core module from {core_init}")
+        
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        spec.loader.exec_module(module)
+        return module
     
-    if not core_init.exists():
-        raise ImportError(f"Core module not found at {core_init}")
+    def validate_file_path(file_path, base_dir, allow_create=False):
+        """Fallback validate_file_path 实现"""
+        file_path = Path(file_path).resolve()
+        base_dir = Path(base_dir).resolve()
+        try:
+            file_path.relative_to(base_dir)
+        except ValueError:
+            raise ValueError(f"路径遍历风险: '{file_path}' 不在 '{base_dir}' 内")
+        return file_path
     
-    spec = importlib.util.spec_from_file_location(module_name, core_init)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Failed to load core module from {core_init}")
+    def validate_json_schema(data, schema, path_hint=None):
+        """Fallback validate_json_schema 实现"""
+        # 基础验证
+        if "type" in schema:
+            expected = schema["type"]
+            if expected == "object" and not isinstance(data, dict):
+                return False, f"期望 object 类型"
+            if expected == "array" and not isinstance(data, list):
+                return False, f"期望 array 类型"
+        if "required" in schema and isinstance(data, dict):
+            for field in schema["required"]:
+                if field not in data:
+                    return False, f"缺少必需字段 '{field}'"
+        return True, None
     
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
+    def safe_load_json_file(file_path, base_dir, schema=None, encoding="utf-8"):
+        """Fallback safe_load_json_file 实现"""
+        try:
+            validated_path = validate_file_path(file_path, base_dir)
+            with open(validated_path, "r", encoding=encoding) as f:
+                data = json.load(f)
+            if schema:
+                valid, error = validate_json_schema(data, schema)
+                if not valid:
+                    return None, error
+            return data, None
+        except Exception as e:
+            return None, str(e)
     
-    # 确保 core 子模块也被正确加载
-    for submodule in ["cache", "utils", "config", "monitor", "module_config"]:
-        sub_path = plugin_dir / "core" / f"{submodule}.py"
-        if sub_path.exists():
-            sub_name = f"CM_perf_opt_core_{submodule}"
-            if sub_name not in sys.modules:
-                sub_spec = importlib.util.spec_from_file_location(sub_name, sub_path)
-                if sub_spec and sub_spec.loader:
-                    sub_module = importlib.util.module_from_spec(sub_spec)
-                    sys.modules[sub_name] = sub_module
-                    sub_spec.loader.exec_module(sub_module)
+    PARAGRAPH_HASH_SCHEMA = {
+        "type": "object",
+        "required": ["stored_paragraph_hashes"],
+        "properties": {
+            "stored_paragraph_hashes": {"type": "array", "items": {"type": "string"}}
+        }
+    }
     
-    spec.loader.exec_module(module)
-    return module
+    class CoreModuleLoadError(ImportError):
+        """Core 模块加载失败异常"""
+        pass
+    
+    class PathTraversalError(ValueError):
+        """路径遍历安全异常"""
+        pass
+    
+    class JsonValidationError(ValueError):
+        """JSON Schema 验证失败异常"""
+        pass
 
 
 # 动态导入核心模块
 try:
     # 优先尝试相对导入（在正确的包结构中）
     from ..core import ModuleStats, MemoryUtils
+    from ..core import (
+        ExpirationConfig,
+        ExpirationManager,
+        FileExpirationManager,
+        RefreshDecision,
+    )
 except ImportError:
     try:
         # 回退到动态加载
-        _core = _load_core_module()
+        _core = load_core_module(Path(__file__).parent)
         ModuleStats = _core.ModuleStats
         MemoryUtils = _core.MemoryUtils
-    except Exception as e:
+        ExpirationConfig = _core.ExpirationConfig
+        ExpirationManager = _core.ExpirationManager
+        FileExpirationManager = _core.FileExpirationManager
+        RefreshDecision = _core.RefreshDecision
+    except (ImportError, CoreModuleLoadError) as e:
         logger.warning(f"[KGCache] 无法加载核心模块，使用内置实现: {e}")
         
         # 内置 fallback 实现
@@ -224,6 +296,110 @@ except ImportError:
                 elif isinstance(obj, (list, tuple, set, frozenset)):
                     size += sum(MemoryUtils.get_size(i, seen) for i in obj)
                 return size
+        
+        # Fallback ExpirationManager 实现
+        from enum import Enum
+        from dataclasses import dataclass, field
+        
+        class RefreshDecision(Enum):
+            """刷新决策枚举"""
+            FULL_REBUILD = "full_rebuild"
+            INCREMENTAL = "incremental"
+            SKIP = "skip"
+        
+        @dataclass
+        class ExpirationConfig:
+            """过期配置"""
+            incremental_refresh_interval: float = 600.0
+            full_rebuild_interval: float = 86400.0
+            incremental_threshold_ratio: float = 0.1
+            deletion_check_interval: int = 10
+        
+        @dataclass
+        class ExpirationState:
+            """过期状态"""
+            last_full_rebuild: float = 0.0
+            last_incremental_refresh: float = 0.0
+            total_count: int = 0
+            incremental_count: int = 0
+            incremental_refresh_count: int = 0
+            cumulative_incremental_count: int = 0
+        
+        class ExpirationManager:
+            """Fallback ExpirationManager 基类"""
+            def __init__(self, config: "ExpirationConfig", name: str = "cache"):
+                self.config = config
+                self.name = name
+                self._state = ExpirationState()
+                self._lock = threading.Lock()
+            
+            def get_refresh_decision(self) -> "RefreshDecision":
+                with self._lock:
+                    now = time.time()
+                    if self._state.last_full_rebuild == 0:
+                        return RefreshDecision.FULL_REBUILD
+                    if now - self._state.last_full_rebuild >= self.config.full_rebuild_interval:
+                        return RefreshDecision.FULL_REBUILD
+                    if self._state.cumulative_incremental_count > self._state.total_count * self.config.incremental_threshold_ratio:
+                        return RefreshDecision.FULL_REBUILD
+                    if now - self._state.last_incremental_refresh < self.config.incremental_refresh_interval:
+                        return RefreshDecision.SKIP
+                    return RefreshDecision.INCREMENTAL
+            
+            def record_full_rebuild(self, total_count: int, max_id: int = 0):
+                with self._lock:
+                    self._state.last_full_rebuild = time.time()
+                    self._state.total_count = total_count
+                    self._state.incremental_count = 0
+                    self._state.incremental_refresh_count = 0
+                    self._state.cumulative_incremental_count = 0
+            
+            def record_incremental_refresh(self, new_count: int, new_max_id: Optional[int] = None):
+                with self._lock:
+                    self._state.last_incremental_refresh = time.time()
+                    self._state.incremental_count = new_count
+                    self._state.incremental_refresh_count += 1
+                    self._state.cumulative_incremental_count += new_count
+            
+            def get_state_dict(self) -> Dict[str, Any]:
+                with self._lock:
+                    return {
+                        "last_full_rebuild": self._state.last_full_rebuild,
+                        "last_incremental_refresh": self._state.last_incremental_refresh,
+                        "total_count": self._state.total_count,
+                        "incremental_count": self._state.incremental_count,
+                        "incremental_refresh_count": self._state.incremental_refresh_count,
+                        "cumulative_incremental_count": self._state.cumulative_incremental_count,
+                    }
+            
+            @property
+            def state(self) -> "ExpirationState":
+                return self._state
+        
+        class FileExpirationManager(ExpirationManager):
+            """Fallback FileExpirationManager - 用于文件缓存"""
+            def __init__(self, config: "ExpirationConfig", name: str = "file_cache"):
+                super().__init__(config, name)
+                self._file_mtimes: Dict[str, float] = {}
+                self._file_sizes: Dict[str, int] = {}
+            
+            def update_file_stats(self, file_path: str, mtime: float, size: int):
+                with self._lock:
+                    self._file_mtimes[file_path] = mtime
+                    self._file_sizes[file_path] = size
+            
+            def get_file_stats(self, file_path: str) -> Dict[str, Any]:
+                with self._lock:
+                    return {
+                        "mtime": self._file_mtimes.get(file_path, 0.0),
+                        "size": self._file_sizes.get(file_path, 0),
+                    }
+            
+            def has_file_changed(self, file_path: str, current_mtime: float, current_size: int) -> bool:
+                with self._lock:
+                    stored_mtime = self._file_mtimes.get(file_path, 0.0)
+                    stored_size = self._file_sizes.get(file_path, 0)
+                    return stored_mtime != current_mtime or stored_size != current_size
 
 
 class KGCacheModule:
@@ -270,7 +446,8 @@ class KGCacheModule:
         self,
         batch_size: int = 100,
         batch_delay: float = 0.05,
-        refresh_interval: int = 3600
+        refresh_interval: int = 3600,
+        expiration_config: Optional["ExpirationConfig"] = None
     ):
         """初始化知识库图谱缓存模块
         
@@ -278,6 +455,7 @@ class KGCacheModule:
             batch_size: 每批加载的条目数，默认 100
             batch_delay: 批次间的延迟秒数，默认 0.05
             refresh_interval: 自动刷新间隔秒数，默认 3600
+            expiration_config: 过期管理配置，若为 None 则使用默认配置
         """
         # 双缓冲
         self.buffer_a: Optional[bool] = None
@@ -338,6 +516,16 @@ class KGCacheModule:
             "skip_count": 0,  # 跳过刷新的次数
             "file_path": None,  # 缓存文件路径（首次加载后设置）
         }
+        
+        # 过期管理器 - 用于文件缓存
+        if expiration_config is None:
+            expiration_config = ExpirationConfig(
+                incremental_refresh_interval=600.0,
+                full_rebuild_interval=86400.0,
+                incremental_threshold_ratio=0.1,
+                deletion_check_interval=10
+            )
+        self._expiration_manager = FileExpirationManager(expiration_config, name="kg_cache")
 
         dep = _dependency_status()
         if self._degraded_mode:
@@ -432,6 +620,17 @@ class KGCacheModule:
                 ent_cnt_data_path = kg_manager.ent_cnt_data_path
                 pg_hash_file_path = kg_manager.pg_hash_file_path
 
+                # 安全验证：确保路径在预期目录内（防止路径遍历攻击）
+                try:
+                    # 获取知识库数据目录作为基准目录
+                    kg_data_dir = Path(graph_data_path).parent
+                    validate_file_path(graph_data_path, kg_data_dir)
+                    validate_file_path(ent_cnt_data_path, kg_data_dir)
+                    validate_file_path(pg_hash_file_path, kg_data_dir)
+                except (PathTraversalError, ValueError) as e:
+                    logger.error(f"[KGCache] (sync) 路径安全验证失败: {e}")
+                    return
+
                 if not os.path.exists(graph_data_path):
                     logger.warning(f"[KGCache] (sync) 知识库图谱文件不存在: {graph_data_path}")
                     return
@@ -479,16 +678,20 @@ class KGCacheModule:
                         logger.warning(f"[KGCache] (sync) 从图结构重建实体计数失败，将使用空 ent_appear_cnt。原因: {e}")
                         ent_appear_cnt_b = {}
 
-                # 加载段落 hash
-                try:
-                    with open(pg_hash_file_path, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                        stored_paragraph_hashes_b = set(data.get("stored_paragraph_hashes", []))
-                except FileNotFoundError:
+                # 加载段落 hash（带 JSON Schema 验证）
+                kg_data_dir = Path(graph_data_path).parent
+                data, error = safe_load_json_file(
+                    pg_hash_file_path,
+                    kg_data_dir,
+                    schema=PARAGRAPH_HASH_SCHEMA,
+                )
+                if data is not None:
+                    stored_paragraph_hashes_b = set(data.get("stored_paragraph_hashes", []))
+                elif error and "不存在" in str(error):
                     logger.warning(f"[KGCache] (sync) 段落 hash 文件不存在: {pg_hash_file_path}")
                     stored_paragraph_hashes_b = set()
-                except Exception as e:
-                    logger.warning(f"[KGCache] (sync) 加载段落 hash 失败: {e}")
+                else:
+                    logger.warning(f"[KGCache] (sync) 加载段落 hash 失败: {error}")
                     stored_paragraph_hashes_b = set()
 
                 if self._stopped:
@@ -709,7 +912,7 @@ class KGCacheModule:
         self._tracker["file_path"] = graph_path
 
     def _should_reload(self, graph_path: str, ent_cnt_path: str, pg_hash_path: str) -> bool:
-        """判断是否需要重新加载。
+        """判断是否需要重新加载（基于文件变更检测）。
 
         Args:
             graph_path: 图谱文件路径
@@ -727,6 +930,30 @@ class KGCacheModule:
         # 检测文件变更
         changes = self._check_file_changes(graph_path, ent_cnt_path, pg_hash_path)
         return changes["any_changed"]
+    
+    def _should_full_rebuild(self) -> bool:
+        """判断是否需要全量重建（基于 ExpirationManager）。
+        
+        Returns:
+            True 表示需要全量重建
+        """
+        decision = self._get_refresh_decision()
+        return decision == RefreshDecision.FULL_REBUILD
+    
+    def _get_refresh_decision(self) -> "RefreshDecision":
+        """获取刷新决策（基于 ExpirationManager）。
+        
+        Returns:
+            RefreshDecision 枚举值
+        """
+        return self._expiration_manager.get_refresh_decision()
+    
+    def _sync_tracker_from_manager(self) -> None:
+        """将 ExpirationManager 的状态同步到 _tracker（用于兼容旧接口）。"""
+        state = self._expiration_manager.get_state_dict()
+        self._tracker["last_full_rebuild"] = state.get("last_full_rebuild", 0.0)
+        self._tracker["total_count"] = state.get("total_count", 0)
+        self._tracker["skip_count"] = state.get("incremental_refresh_count", 0)
     
     async def _load_to_buffer_b(self) -> None:
         """缓慢加载数据到缓冲区 B（异步）"""
@@ -832,28 +1059,44 @@ class KGCacheModule:
                     logger.warning(f"[KGCache] 从图结构重建实体计数失败，将使用空 ent_appear_cnt。原因: {e}")
                     ent_appear_cnt_b = {}
             
-            # 加载段落 hash
+            # 加载段落 hash（带 JSON Schema 验证）
             try:
-                if AIOFILES_AVAILABLE and aiofiles is not None:
-                    async with aiofiles.open(pg_hash_file_path, "r", encoding="utf-8") as f:
-                        content = await f.read()
-                        data = json.loads(content)
-                        stored_paragraph_hashes_b = set(data.get("stored_paragraph_hashes", []))
+                # 先验证路径安全性
+                kg_data_dir = Path(graph_data_path).parent
+                try:
+                    validated_path = validate_file_path(pg_hash_file_path, kg_data_dir)
+                except (PathTraversalError, ValueError) as path_err:
+                    logger.error(f"[KGCache] 路径安全验证失败: {path_err}")
+                    stored_paragraph_hashes_b = set()
                 else:
-                    # 降级到同步方式
-                    def load_pg_hash():
-                        with open(pg_hash_file_path, "r", encoding="utf-8") as f:
-                            return json.load(f)
+                    if AIOFILES_AVAILABLE and aiofiles is not None:
+                        async with aiofiles.open(validated_path, "r", encoding="utf-8") as f:
+                            content = await f.read()
+                            data = json.loads(content)
+                    else:
+                        # 降级到同步方式
+                        def load_pg_hash():
+                            with open(validated_path, "r", encoding="utf-8") as f:
+                                return json.load(f)
+                        
+                        data = await asyncio.to_thread(load_pg_hash)
                     
-                    data = await asyncio.to_thread(load_pg_hash)
-                    stored_paragraph_hashes_b = set(data.get("stored_paragraph_hashes", []))
-                
-                logger.debug(f"[KGCache] 加载段落hash: {len(stored_paragraph_hashes_b)} 个段落")
+                    # JSON Schema 验证
+                    valid, error = validate_json_schema(data, PARAGRAPH_HASH_SCHEMA, str(validated_path))
+                    if valid:
+                        stored_paragraph_hashes_b = set(data.get("stored_paragraph_hashes", []))
+                        logger.debug(f"[KGCache] 加载段落hash: {len(stored_paragraph_hashes_b)} 个段落")
+                    else:
+                        logger.warning(f"[KGCache] JSON Schema 验证失败: {error}")
+                        stored_paragraph_hashes_b = set()
             except FileNotFoundError:
                 logger.warning(f"[KGCache] 段落 hash 文件不存在: {pg_hash_file_path}")
                 stored_paragraph_hashes_b = set()
-            except Exception as e:
-                logger.warning(f"[KGCache] 加载段落 hash 失败: {e}")
+            except json.JSONDecodeError as e:
+                logger.warning(f"[KGCache] JSON 解析失败: {e}")
+                stored_paragraph_hashes_b = set()
+            except OSError as e:
+                logger.warning(f"[KGCache] 文件读取失败: {e}")
                 stored_paragraph_hashes_b = set()
             
             if self._stopped:
@@ -888,6 +1131,18 @@ class KGCacheModule:
             # 更新文件变更追踪器
             total_count = len(nodes_b) + len(edges_b) + len(ent_appear_cnt_b)
             self._update_tracker(graph_data_path, ent_cnt_data_path, pg_hash_file_path, total_count)
+            
+            # 更新 ExpirationManager 的文件统计信息
+            graph_stats = self._get_file_stats(graph_data_path)
+            ent_cnt_stats = self._get_file_stats(ent_cnt_data_path)
+            pg_hash_stats = self._get_file_stats(pg_hash_file_path)
+            self._expiration_manager.update_file_stats(graph_data_path, graph_stats["mtime"], graph_stats["size"])
+            self._expiration_manager.update_file_stats(ent_cnt_data_path, ent_cnt_stats["mtime"], ent_cnt_stats["size"])
+            self._expiration_manager.update_file_stats(pg_hash_file_path, pg_hash_stats["mtime"], pg_hash_stats["size"])
+            
+            # 记录全量重建到 ExpirationManager
+            self._expiration_manager.record_full_rebuild(total_count)
+            self._sync_tracker_from_manager()
 
             self.last_refresh = time.time()
             load_time = time.time() - t0
@@ -910,7 +1165,7 @@ class KGCacheModule:
                 self.loading = False
     
     async def _refresh_loop(self) -> None:
-        """定期刷新循环（带文件变更检测）"""
+        """定期刷新循环（带 ExpirationManager 决策和文件变更检测）"""
         while not self._stopped:
             await asyncio.sleep(self.refresh_interval)
             if self._stopped:
@@ -927,7 +1182,21 @@ class KGCacheModule:
                 logger.warning(f"[KGCache] 获取文件路径失败: {e}")
                 continue
 
-            # 检测文件变更
+            # 获取刷新决策
+            decision = self._get_refresh_decision()
+            
+            if decision == RefreshDecision.SKIP:
+                # 跳过刷新
+                self._tracker["skip_count"] += 1
+                logger.debug(f"[KGCache] ExpirationManager 决策跳过刷新（累计跳过 {self._tracker['skip_count']} 次）")
+                continue
+            
+            if decision == RefreshDecision.FULL_REBUILD:
+                logger.info("[KGCache] ExpirationManager 决策触发全量重建...")
+                await self._load_to_buffer_b()
+                continue
+            
+            # INCREMENTAL 决策：检测文件变更
             if self._should_reload(graph_path, ent_cnt_path, pg_hash_path):
                 logger.info("[KGCache] 检测到文件变更，触发刷新...")
                 await self._load_to_buffer_b()

@@ -8,9 +8,6 @@
 
 覆盖目标：
 
-- [`src.chat.utils.chat_message_builder.replace_user_references()`](../src/chat/utils/chat_message_builder.py:22)
-- [`src.chat.message_receive.storage.MessageStorage.store_message()`](../src/chat/message_receive/storage.py:32)
-- [`src.chat.message_receive.storage.MessageStorage.replace_image_descriptions()`](../src/chat/message_receive/storage.py:174)
 - [`src.chat.utils.utils.is_mentioned_bot_in_message()`](../src/chat/utils/utils.py:117)
 
 实现风格参考：
@@ -24,14 +21,12 @@
 
 from __future__ import annotations
 
-import importlib.util
-import inspect
 import re
 import sys
 import threading
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Pattern, Tuple, cast
+from typing import Any, Callable, Dict, List, Optional, Pattern, Tuple, cast
 
 try:
     from src.common.logger import get_logger
@@ -45,20 +40,43 @@ except ImportError:  # pragma: no cover
 logger = get_logger("CM_perf_opt")
 
 
+# 从公共模块导入动态加载函数
+try:
+    from core.compat import load_core_module, CoreModuleLoadError
+except ImportError:
+    # 回退定义
+    import importlib.util
+    
+    def load_core_module(caller_path=None, module_name="CM_perf_opt_core", submodules=None):
+        """Fallback load_core_module 实现"""
+        module_name = "CM_perf_opt_core"
+        if module_name in sys.modules:
+            return sys.modules[module_name]
+        
+        current_dir = Path(__file__).parent
+        plugin_dir = current_dir.parent.parent
+        core_init = plugin_dir / "core" / "__init__.py"
+        
+        if not core_init.exists():
+            raise ImportError(f"Core module not found at {core_init}")
+        
+        spec = importlib.util.spec_from_file_location(module_name, core_init)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"Failed to load core module from {core_init}")
+        
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        spec.loader.exec_module(module)
+        return module
+    
+    class CoreModuleLoadError(ImportError):
+        """Core 模块加载失败异常"""
+        pass
+
+
 # ============================
 # 静态模式：模块级预编译
 # ============================
-
-# chat_message_builder.replace_user_references
-_RE_REPLY: Pattern[str] = re.compile(r"回复<([^:<>]+):([^:<>]+)>")
-_RE_AT: Pattern[str] = re.compile(r"@<([^:<>]+):([^:<>]+)>")
-
-# MessageStorage.store_message / replace_image_descriptions
-_RE_MAIN_RULE: Pattern[str] = re.compile(
-    r"<MainRule>.*?</MainRule>|<schedule>.*?</schedule>|<UserMessage>.*?</UserMessage>",
-    re.DOTALL,
-)
-_RE_IMAGE_DESC: Pattern[str] = re.compile(r"\[图片：([^\]]+)\]")
 
 # utils.is_mentioned_bot_in_message（静态）
 _RE_REPLY_YOU_PAREN: Pattern[str] = re.compile(r"\[回复 .*?\(你\)：")
@@ -72,6 +90,7 @@ _RE_CLEAN_REPLY_PAREN: Pattern[str] = re.compile(
 _RE_CLEAN_REPLY_ANGLE: Pattern[str] = re.compile(
     r"\[回复<(.+?)(?=:(\d+))\:(\d+)>：(.+?)\]，说："
 )
+
 
 # ============================
 # 动态模式：LRU 缓存编译结果
@@ -113,58 +132,15 @@ def _re_reply_id_angle(current_account: str) -> Pattern[str]:
     )
 
 
-def _load_core_module():
-    """动态加载 core 模块，避免相对导入在插件加载方式下失效。"""
-
-    module_name = "CM_perf_opt_core"
-    if module_name in sys.modules:
-        return sys.modules[module_name]
-
-    current_dir = Path(__file__).parent
-    plugin_dir = current_dir.parent.parent  # components/modules -> components -> plugin root
-    core_init = plugin_dir / "core" / "__init__.py"
-
-    if not core_init.exists():
-        raise ImportError(f"Core module not found at {core_init}")
-
-    spec = importlib.util.spec_from_file_location(module_name, core_init)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Failed to load core module from {core_init}")
-
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
-
-    # 预加载常用子模块（提高兼容性；失败不致命）
-    for submodule in ["cache", "utils", "config", "monitor", "module_config"]:
-        sub_path = plugin_dir / "core" / f"{submodule}.py"
-        if not sub_path.exists():
-            continue
-        sub_name = f"CM_perf_opt_core_{submodule}"
-        if sub_name in sys.modules:
-            continue
-        sub_spec = importlib.util.spec_from_file_location(sub_name, sub_path)
-        if sub_spec is None or sub_spec.loader is None:
-            continue
-        sub_mod = importlib.util.module_from_spec(sub_spec)
-        sys.modules[sub_name] = sub_mod
-        try:
-            sub_spec.loader.exec_module(sub_mod)
-        except Exception:
-            pass
-
-    spec.loader.exec_module(module)
-    return module
-
-
-# ========== 核心模块加载（ModuleStats / MemoryUtils） ==========
+# ========== 核心模块加载（ModuleStats / MemoryUtils）==========
 try:
     from ..core import MemoryUtils, ModuleStats
 except Exception:
     try:
-        _core = _load_core_module()
+        _core = load_core_module(Path(__file__).parent)
         ModuleStats = _core.ModuleStats
         MemoryUtils = _core.MemoryUtils
-    except Exception as e:  # pragma: no cover
+    except (ImportError, CoreModuleLoadError) as e:  # pragma: no cover
         logger.warning(f"[RegexPrecompile] 无法加载核心模块，使用内置实现: {e}")
 
         class ModuleStats:  # type: ignore[no-redef]
@@ -245,7 +221,7 @@ class RegexPrecompileModule:
         # 保存原始实现引用，便于 revert
         self._originals: Dict[str, Any] = {}
 
-        # 保存 patched 引用（仅在 revert 时用于“只回滚自己打的补丁”）
+        # 保存 patched 引用（仅在 revert 时用于"只回滚自己打的补丁"）
         self._patched_refs: Dict[str, Any] = {}
 
         # alias import 补丁（sys.modules 扫描替换）
@@ -264,92 +240,10 @@ class RegexPrecompileModule:
                 return
 
             # 记录是否已写入 patch，用于异常回滚
-            applied_builder = False
             applied_utils = False
-            applied_store = False
-            applied_replace_img = False
 
             try:
-                # 1) replace_user_references
-                from src.chat.utils import chat_message_builder as builder_mod
-
-                orig_replace = getattr(builder_mod, "replace_user_references", None)
-                if not callable(orig_replace):
-                    raise AttributeError(
-                        "chat_message_builder.replace_user_references 不存在或不可调用"
-                    )
-
-                def patched_replace_user_references(
-                    content: Optional[str],
-                    platform: str,
-                    name_resolver: Optional[Callable[[str, str], str]] = None,
-                    replace_bot_name: bool = True,
-                ) -> str:
-                    """替换内容中的用户引用格式（包装器模式）。"""
-
-                    if not callable(orig_replace):
-                        return "" if content is None else str(content)
-
-                    wrapped = cast(
-                        Callable[[Optional[str], str, Optional[Callable[[str, str], str]], bool], str],
-                        orig_replace,
-                    )
-                    # 仅保留预编译优化入口（如需扩展，可在此做轻量准备）
-                    return wrapped(content, platform, name_resolver, replace_bot_name)
-
-                # 2) MessageStorage.store_message / replace_image_descriptions
-                from src.chat.message_receive import storage as storage_mod
-
-                MessageStorage = storage_mod.MessageStorage
-
-                orig_store_desc = MessageStorage.__dict__.get("store_message")
-                orig_replace_img_desc = MessageStorage.__dict__.get(
-                    "replace_image_descriptions"
-                )
-
-                if isinstance(orig_store_desc, staticmethod):
-                    orig_store_callable = orig_store_desc.__func__
-                else:
-                    orig_store_callable = orig_store_desc if callable(orig_store_desc) else None
-
-                if isinstance(orig_replace_img_desc, staticmethod):
-                    orig_replace_img_callable = orig_replace_img_desc.__func__
-                else:
-                    orig_replace_img_callable = (
-                        orig_replace_img_desc if callable(orig_replace_img_desc) else None
-                    )
-
-                if not callable(orig_store_callable):
-                    raise AttributeError("MessageStorage.store_message 不存在或不可调用")
-                if not callable(orig_replace_img_callable):
-                    raise AttributeError(
-                        "MessageStorage.replace_image_descriptions 不存在或不可调用"
-                    )
-
-                async def patched_store_message(message: Any, chat_stream: Any) -> None:
-                    """存储消息到数据库（包装器模式）。"""
-
-                    if not callable(orig_store_callable):
-                        return None
-
-                    wrapped = cast(Callable[[Any, Any], Any], orig_store_callable)
-                    # 仅保留预编译优化入口（如需扩展，可在此做轻量准备）
-                    result = wrapped(message, chat_stream)
-                    if inspect.isawaitable(result):
-                        await cast(Awaitable[Any], result)
-                    return None
-
-                def patched_replace_image_descriptions(text: str) -> str:
-                    """将[图片：描述]替换为[picid:image_id]（包装器模式）。"""
-
-                    if not callable(orig_replace_img_callable):
-                        return str(text)
-
-                    wrapped = cast(Callable[[str], str], orig_replace_img_callable)
-                    # 仅保留预编译优化入口（如需扩展，可在此做轻量准备）
-                    return wrapped(text)
-
-                # 3) is_mentioned_bot_in_message
+                # is_mentioned_bot_in_message
                 from src.chat.utils import utils as utils_mod
 
                 orig_is_mentioned = getattr(utils_mod, "is_mentioned_bot_in_message", None)
@@ -464,12 +358,7 @@ class RegexPrecompileModule:
                 # 写入 monkey-patch（先记录 originals + patched refs，保证可回滚且不干扰其它补丁）
                 # ============================
 
-                self._originals["chat_message_builder.replace_user_references"] = orig_replace
                 self._originals["utils.is_mentioned_bot_in_message"] = orig_is_mentioned
-                self._originals["MessageStorage.store_message_descriptor"] = orig_store_desc
-                self._originals[
-                    "MessageStorage.replace_image_descriptions_descriptor"
-                ] = orig_replace_img_desc
 
                 # PatchChain 注册（冲突检测 + 链式追踪）
                 _pc = None
@@ -481,40 +370,9 @@ class RegexPrecompileModule:
                     pass
                 if _pc is not None:
                     _pc.register_patch(
-                        "replace_user_references", "regex_precompile",
-                        orig_replace, patched_replace_user_references,
-                    )
-                    _pc.register_patch(
-                        "store_message", "regex_precompile",
-                        orig_store_callable, patched_store_message,
-                    )
-                    _pc.register_patch(
-                        "replace_image_descriptions", "regex_precompile",
-                        orig_replace_img_callable, patched_replace_image_descriptions,
-                    )
-                    _pc.register_patch(
                         "is_mentioned_bot_in_message", "regex_precompile",
                         orig_is_mentioned, patched_is_mentioned_bot_in_message,
                     )
-
-                # replace_user_references
-                builder_mod.replace_user_references = patched_replace_user_references  # type: ignore[assignment]
-                self._patched_refs[
-                    "chat_message_builder.replace_user_references"
-                ] = patched_replace_user_references
-                applied_builder = True
-
-                # MessageStorage 方法（descriptor 级 patch，便于完整恢复）
-                store_desc = staticmethod(patched_store_message)
-                replace_desc = staticmethod(patched_replace_image_descriptions)
-                MessageStorage.store_message = store_desc
-                MessageStorage.replace_image_descriptions = replace_desc
-                self._patched_refs["MessageStorage.store_message_descriptor"] = store_desc
-                self._patched_refs[
-                    "MessageStorage.replace_image_descriptions_descriptor"
-                ] = replace_desc
-                applied_store = True
-                applied_replace_img = True
 
                 # is_mentioned_bot_in_message
                 utils_mod.is_mentioned_bot_in_message = patched_is_mentioned_bot_in_message  # type: ignore[assignment]
@@ -530,21 +388,6 @@ class RegexPrecompileModule:
                 for mod_name, mod in list(sys.modules.items()):
                     if mod is None:
                         continue
-
-                    # replace_user_references
-                    try:
-                        if getattr(mod, "replace_user_references", None) is orig_replace:
-                            self._alias_patches.append(
-                                (
-                                    str(mod_name),
-                                    "replace_user_references",
-                                    orig_replace,
-                                    patched_replace_user_references,
-                                )
-                            )
-                            setattr(mod, "replace_user_references", patched_replace_user_references)
-                    except Exception:
-                        pass
 
                     # is_mentioned_bot_in_message
                     try:
@@ -568,43 +411,6 @@ class RegexPrecompileModule:
                     except Exception:
                         pass
 
-                    # store_message（函数对象 alias）
-                    try:
-                        if getattr(mod, "store_message", None) is orig_store_callable:
-                            self._alias_patches.append(
-                                (
-                                    str(mod_name),
-                                    "store_message",
-                                    orig_store_callable,
-                                    patched_store_message,
-                                )
-                            )
-                            setattr(mod, "store_message", patched_store_message)
-                    except Exception:
-                        pass
-
-                    # replace_image_descriptions（函数对象 alias）
-                    try:
-                        if (
-                            getattr(mod, "replace_image_descriptions", None)
-                            is orig_replace_img_callable
-                        ):
-                            self._alias_patches.append(
-                                (
-                                    str(mod_name),
-                                    "replace_image_descriptions",
-                                    orig_replace_img_callable,
-                                    patched_replace_image_descriptions,
-                                )
-                            )
-                            setattr(
-                                mod,
-                                "replace_image_descriptions",
-                                patched_replace_image_descriptions,
-                            )
-                    except Exception:
-                        pass
-
                 self._patched = True
                 self._patch_success += 1
                 _stats_hit(self.stats)
@@ -613,7 +419,7 @@ class RegexPrecompileModule:
             except Exception as e:
                 # 尝试回滚可能已写入的 patch（保持稳定性优先）
                 try:
-                    if applied_builder or applied_utils or applied_store or applied_replace_img:
+                    if applied_utils:
                         self.revert_patch()
                 except Exception:
                     pass
@@ -640,24 +446,7 @@ class RegexPrecompileModule:
 
             # 2) revert 主目标
             try:
-                from src.chat.utils import chat_message_builder as builder_mod
                 from src.chat.utils import utils as utils_mod
-                from src.chat.message_receive.storage import MessageStorage
-
-                # replace_user_references：仅当仍为我们 patched 才恢复
-                orig_replace = self._originals.get(
-                    "chat_message_builder.replace_user_references"
-                )
-                patched_replace = self._patched_refs.get(
-                    "chat_message_builder.replace_user_references"
-                )
-                if (
-                    callable(orig_replace)
-                    and patched_replace is not None
-                    and getattr(builder_mod, "replace_user_references", None)
-                    is patched_replace
-                ):
-                    builder_mod.replace_user_references = orig_replace  # type: ignore[assignment]
 
                 # is_mentioned_bot_in_message：仅当仍为我们 patched 才恢复
                 orig_is_mentioned = self._originals.get(
@@ -674,43 +463,11 @@ class RegexPrecompileModule:
                 ):
                     utils_mod.is_mentioned_bot_in_message = orig_is_mentioned  # type: ignore[assignment]
 
-                # MessageStorage：descriptor 级恢复（仅当 descriptor 仍为我们 patched）
-                orig_store_desc = self._originals.get(
-                    "MessageStorage.store_message_descriptor"
-                )
-                patched_store_desc = self._patched_refs.get(
-                    "MessageStorage.store_message_descriptor"
-                )
-                if (
-                    orig_store_desc is not None
-                    and patched_store_desc is not None
-                    and MessageStorage.__dict__.get("store_message")
-                    is patched_store_desc
-                ):
-                    MessageStorage.store_message = orig_store_desc
-
-                orig_replace_img_desc = self._originals.get(
-                    "MessageStorage.replace_image_descriptions_descriptor"
-                )
-                patched_replace_img_desc = self._patched_refs.get(
-                    "MessageStorage.replace_image_descriptions_descriptor"
-                )
-                if (
-                    orig_replace_img_desc is not None
-                    and patched_replace_img_desc is not None
-                    and MessageStorage.__dict__.get("replace_image_descriptions")
-                    is patched_replace_img_desc
-                ):
-                    MessageStorage.replace_image_descriptions = orig_replace_img_desc
-
                 # PatchChain 取消注册
                 try:
                     _cm = sys.modules.get("CM_perf_opt_core")
                     if _cm and hasattr(_cm, "get_patch_chain"):
                         _pc = _cm.get_patch_chain()
-                        _pc.unregister_patch("replace_user_references", "regex_precompile")
-                        _pc.unregister_patch("store_message", "regex_precompile")
-                        _pc.unregister_patch("replace_image_descriptions", "regex_precompile")
                         _pc.unregister_patch("is_mentioned_bot_in_message", "regex_precompile")
                 except Exception:
                     pass

@@ -1,5 +1,8 @@
-# CM-performance-optimizer - 自动生成的配置文件
-# 性能优化 - 消息缓存（查询模式/全量模式） + 消息热集 + 人物信息缓存 + 表达式缓存 + 黑话缓存 + 知识库图谱缓存
+# CM-performance-optimizer - 配置文件
+# 性能优化 - 消息缓存 + 人物信息缓存 + 表达式缓存 + 黑话缓存 + 知识库图谱缓存 + 通知系统 + 错误日志通知
+# 配置版本: 2.0.0
+#
+# ⚠️ 注意：配置修改后需要重启 MaiBot 才能生效！
 
 # ConfigSection(title='插件设置', description='插件的基础配置', icon='🔧', collapsed=False, order=0)
 [plugin]
@@ -13,71 +16,259 @@ config_version = "2.0.0"
 # 日志级别
 log_level = "INFO"
 
-# ConfigSection(title='性能优化模块', description='选择要启用的性能优化功能模块', icon='⚡', collapsed=False, order=1)
 
-[performance]
+# ConfigSection(title='功能模块开关', description='选择要启用的性能优化功能模块', icon='⚡', collapsed=False, order=1)
+[modules]
 
 # 是否启用消息缓存
-enable_message_cache = true
+message_cache_enabled = true
 
-# 是否启用人格信息缓存
-enable_person_cache = true
+# 是否启用消息仓库快速路径
+message_repository_fastpath_enabled = true
 
-# 是否启用表情缓存
-enable_expression_cache = true
+# 是否启用人物信息缓存
+person_cache_enabled = true
+
+# 是否启用表达式缓存
+expression_cache_enabled = true
 
 # 是否启用黑话缓存
-enable_jargon_cache = true
+jargon_cache_enabled = true
+
+# 是否启用黑话匹配自动机加速
+jargon_matcher_automaton_enabled = true
 
 # 是否启用知识图谱缓存
-enable_kg_cache = true
+kg_cache_enabled = true
 
-# 是否启用错别字生成器缓存（pinyin_dict 持久化缓存 + jieba valid_words 内存缓存）
-enable_typo_generator_cache = true
+# 是否启用Levenshtein距离加速
+levenshtein_fast_enabled = true
 
-# ConfigSection(title='高级设置', description='异步IO、JSON加速等高级选项', icon='⚙️', collapsed=True, order=3)
-enable_jargon_matcher_automaton = true
-enable_message_repository_fastpath = true
-enable_db_tuning = true
+# 是否启用图片描述批量替换
+image_desc_bulk_lookup_enabled = true
 
-# 是否启用 asyncio 事件循环池（embedding 工作线程复用 thread-local event loop；高风险）
-enable_asyncio_loop_pool = true
+# 是否启用用户引用批量解析
+user_reference_batch_resolve_enabled = true
 
+# 是否启用正则预编译
+regex_precompile_enabled = true
+
+# 是否启用typo_generator缓存
+typo_generator_cache_enabled = true
+
+# 是否启用SQLite数据库调优
+db_tuning_enabled = true
+
+# 是否启用轻量性能剖析
+lightweight_profiler_enabled = true
+
+# 是否启用asyncio_loop_pool
+asyncio_loop_pool_enabled = true
+
+
+# ConfigSection(title='消息缓存配置', description='消息热集缓存，加速消息查询', icon='💬', collapsed=True, order=2)
+[message_cache]
+
+# 每个聊天的缓存消息数量 (50-1000)
+per_chat_limit = 200
+
+# 缓存过期时间(秒) (60-3600)
+ttl = 300
+
+# 最大缓存聊天数 (100-2000)
+max_chats = 500
+
+# 缓存模式: query或full
+mode = "query"
+
+# 活跃聊天流是否忽略TTL限制
+ignore_time_limit_when_active = true
+
+# 活跃时间窗口(秒) (60-1800)
+active_time_window = 300
+
+# 滑动窗口分桶功能(预留)
+bucket_enabled = false
+
+# 分桶时间间隔(秒)
+bucket_seconds = 5
+
+
+# ConfigSection(title='人物缓存配置', description='人物信息缓存，减少数据库查询', icon='👤', collapsed=True, order=3)
+[person_cache]
+
+# 最大缓存条目数 (500-10000)
+max_size = 3000
+
+# 缓存过期时间(秒) (300-7200)
+ttl = 1800
+
+# 是否启用预热功能
+warmup_enabled = true
+
+# 预热时每聊天采样消息数 (10-100)
+warmup_per_chat_sample = 30
+
+# 每聊天最多预热人数 (5-50)
+warmup_max_persons = 20
+
+# 预热记录过期时间(秒) (60-300)
+warmup_ttl = 120
+
+# 预热防抖时间(秒) (1.0-10.0)
+warmup_debounce_seconds = 3
+
+
+# ConfigSection(title='表达式缓存配置', description='表达式缓存，加速表达式匹配', icon='📝', collapsed=True, order=4)
+[expression_cache]
+
+# 批量处理大小 (10-500)
+batch_size = 100
+
+# 批量处理延迟(秒) (0.01-1.0)
+batch_delay = 0.05
+
+# 刷新间隔(秒) (600-86400)
+refresh_interval = 3600
+
+# 增量刷新间隔(秒) (60-3600)
+incremental_refresh_interval = 600
+
+# 增量刷新阈值比例 (0.05-0.5)
+incremental_threshold_ratio = 0.1
+
+# 完全重建间隔(秒) (3600-604800)
+full_rebuild_interval = 86400
+
+# 删除检查间隔(秒) (5-100)
+deletion_check_interval = 10
+
+
+# ConfigSection(title='黑话缓存配置', description='黑话缓存，加速黑话解析', icon='📖', collapsed=True, order=5)
+[jargon_cache]
+
+# 批量处理大小 (10-500)
+batch_size = 100
+
+# 批量处理延迟(秒) (0.01-1.0)
+batch_delay = 0.05
+
+# 刷新间隔(秒) (600-86400)
+refresh_interval = 3600
+
+# 是否启用内容索引
+enable_content_index = true
+
+# 增量刷新间隔(秒) (60-3600)
+incremental_refresh_interval = 600
+
+# 增量刷新阈值比例 (0.05-0.5)
+incremental_threshold_ratio = 0.1
+
+# 完全重建间隔(秒) (3600-604800)
+full_rebuild_interval = 86400
+
+# 删除检查间隔(秒) (5-100)
+deletion_check_interval = 10
+
+
+# ConfigSection(title='知识图谱缓存配置', description='知识图谱缓存，加速知识检索', icon='🧠', collapsed=True, order=6)
+[kg_cache]
+
+# 批量处理大小 (10-500)
+batch_size = 100
+
+# 批量处理延迟(秒) (0.01-1.0)
+batch_delay = 0.05
+
+# 刷新间隔(秒) (600-86400)
+refresh_interval = 3600
+
+# 增量刷新间隔(秒) (60-3600)
+incremental_refresh_interval = 600
+
+# 增量刷新阈值比例 (0.05-0.5)
+incremental_threshold_ratio = 0.1
+
+# 完全重建间隔(秒) (3600-604800)
+full_rebuild_interval = 86400
+
+# 删除检查间隔(秒) (5-100)
+deletion_check_interval = 10
+
+# 是否使用Parquet格式
+use_parquet = true
+
+
+# ConfigSection(title='数据库调优配置', description='SQLite数据库性能优化参数', icon='🗄️', collapsed=True, order=7)
+[db_tuning]
+
+# SQLite mmap_size(字节,0=禁用)
+mmap_size = 268435456
+
+# WAL checkpoint周期(秒,0=禁用)
+wal_checkpoint_interval = 300
+
+
+# ConfigSection(title='性能剖析配置', description='轻量性能剖析器设置', icon='🔬', collapsed=True, order=8)
+[lightweight_profiler]
+
+# 采样率(0-1)
+sample_rate = 0.1
+
+
+# ConfigSection(title='高级设置', description='异步IO、JSON加速等高级选项', icon='⚙️', collapsed=True, order=9)
 [advanced]
 
-# 是否启用异步IO优化
+# 是否启用异步IO
 enable_async_io = true
 
-# 是否启用orjson加速
+# 是否启用orjson
 enable_orjson = true
 
-# 线程池大小
-thread_pool_size = 8
-
-# 垃圾回收间隔（秒）
+# 垃圾回收间隔(秒)
 gc_interval = 300
 
-# ConfigSection(title='监控设置', description='统计报告和内存监控配置', icon='📊', collapsed=True, order=4)
+# 是否启用配置热重载
 
+# 是否启用严格验证
+strict_validation = false
+
+# 是否启用配置变更通知
+
+
+# ConfigSection(title='监控设置', description='统计报告和内存监控配置', icon='📊', collapsed=True, order=10)
 [monitoring]
 
-# 是否启用统计功能
+# 是否启用统计
 enable_stats = true
 
-# 统计报告间隔（秒）
+# 统计间隔(秒) (10-3600)
 stats_interval = 60
 
 # 是否启用内存监控
 enable_memory_monitor = true
 
-# 内存警告阈值
-memory_warning_threshold = 0.8
+# 内存警告阈值(0-1)
+memory_warning_threshold = 0.2
 
-# 内存临界阈值
-memory_critical_threshold = 0.9
+# 内存严重阈值(0-1)
+memory_critical_threshold = 0.5
 
-[modules]
-message_cache_enabled = true
-message_cache_ignore_time_limit_when_active = true
-person_cache_warmup_enabled = true
-jargon_cache_enable_content_index = true
+# 是否启用健康检查
+enable_health_check = true
+
+# 健康检查间隔(秒) (10-300)
+health_check_interval = 60
+
+
+# ConfigSection(title='通知设置', description='QQ通知和控制台通知配置', icon='🔔', collapsed=True, order=11)
+[notification]
+
+# 启用通知功能
+enabled = true
+
+# 接收通知的QQ号（留空则不发送QQ通知）
+admin_qq = "645710451"
+
+
