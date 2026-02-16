@@ -1,13 +1,4 @@
-# -*- coding: utf-8 -*-
-# CM-performance-optimizer-plugin/requirements.txt
-#
-# 使用说明（中文）：
-# 1) 本文件用于列出本插件“可能需要”的第三方 Python 依赖。
-# 2) MaiBot 通常在自身运行环境中已自带部分依赖（例如 peewee）。这里仍然列出，便于离线测试/CI/容器化部署。
-# 3) 标注为“可选”的依赖：未安装时插件仍可加载，但对应模块会自动降级/禁用（或启用失败后记录日志）。
-# 4) 安装方式：
-#    pip install -r CM-performance-optimizer-plugin/requirements.txt
-#
+# 安装依赖: cd CM-performance-optimizer-plugin && uv pip install -r requirements.txt
 
 # ----------------------
 # 必需依赖（运行基础）

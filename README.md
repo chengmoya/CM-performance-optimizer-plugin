@@ -82,7 +82,7 @@ CM-performance-optimizer 是一个面向 MaiBot 的全栈性能优化插件，�
 2. **安装依赖**
 
    ```bash
-   pip install -r CM-performance-optimizer-plugin/requirements.txt
+   cd CM-performance-optimizer-plugin && uv pip install -r requirements.txt
    ```
 
    > **提示**：大部分依赖为可选依赖，未安装时插件仍可运行，但对应增强模块会自动降级或禁用。
