@@ -30,6 +30,14 @@ from typing import (
     Union,
 )
 
+# 统一版本管理
+import sys
+from pathlib import Path as FilePath
+_plugin_dir = FilePath(__file__).parent.parent
+if str(_plugin_dir) not in sys.path:
+    sys.path.insert(0, str(_plugin_dir))
+from version import CONFIG_VERSION, MIN_COMPATIBLE_VERSION
+
 try:
     import tomllib
 except ImportError:
@@ -219,8 +227,8 @@ class ExtendedConfigField:
 class ConfigVersion:
     """配置版本管理"""
 
-    CURRENT_VERSION = "5.2.0"
-    MIN_COMPATIBLE_VERSION = "1.0.0"
+    CURRENT_VERSION = CONFIG_VERSION
+    MIN_COMPATIBLE_VERSION = MIN_COMPATIBLE_VERSION
 
     @staticmethod
     def parse_version(version_str: str) -> Tuple[int, int, int]:
@@ -535,7 +543,7 @@ class ConfigManager:
             ),
             "config_version": ExtendedConfigField(
                 field_type=ConfigFieldType.STR,
-                default="5.2.0",
+                default=CONFIG_VERSION,
                 description="配置文件版本",
                 section="plugin",
                 order=1,

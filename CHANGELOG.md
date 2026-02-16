@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [6.0.0] - 2026-02-16
 
 ### Added
+- 统一版本管理机制
+  - 新增 `version.py` 集中管理所有版本号
+  - 插件版本、配置版本、MaiBot最低版本统一管理
+  - 确保版本一致性
 - 通知系统（QQ消息 + 控制台）
   - QQ通知渠道（通过MaiBot发送消息）
   - 控制台通知渠道

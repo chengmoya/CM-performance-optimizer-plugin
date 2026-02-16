@@ -1,6 +1,6 @@
 # CM-performance-optimizer - 配置文件
 # 性能优化 - 消息缓存 + 人物信息缓存 + 表达式缓存 + 黑话缓存 + 知识库图谱缓存 + 通知系统 + 错误日志通知
-# 配置版本: 5.2.0
+# 配置版本: 6.0.0
 #
 # ⚠️ 注意：配置修改后需要重启 MaiBot 才能生效！
 
@@ -11,7 +11,7 @@
 enabled = true
 
 # 配置文件版本
-config_version = "5.2.0"
+config_version = "6.0.0"
 
 # 日志级别
 log_level = "INFO"

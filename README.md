@@ -1,6 +1,8 @@
 # CM-performance-optimizer（性能优化插件）
 
 [![Version](https://img.shields.io/badge/version-6.0.0-blue.svg)](https://github.com/chengmoya/CM-performance-optimizer-plugin)
+
+> **注意**：插件版本号已统一管理在 [`version.py`](version.py) 文件中。
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![MaiBot](https://img.shields.io/badge/MaiBot-%3E%3D0.12.0-purple.svg)](https://github.com/Mai-with-u/MaiBot)
 
@@ -134,7 +136,7 @@ CM-performance-optimizer 是一个面向 MaiBot 的全栈性能优化插件，�
 | 配置项 | 类型 | 默认值 | 说明 |
 |-------|------|-------|------|
 | `enabled` | boolean | `true` | 是否启用插件 |
-| `config_version` | string | `"5.2.0"` | 配置文件版本（用于配置迁移，请勿手动修改） |
+| `config_version` | string | `"6.0.0"` | 配置文件版本（用于配置迁移，请勿手动修改） |
 | `log_level` | string | `"INFO"` | 日志级别，可选值：`DEBUG`、`INFO`、`WARNING`、`ERROR`、`CRITICAL` |
 
 ### 功能模块开关

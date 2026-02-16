@@ -1,5 +1,5 @@
 """
-CM 性能优化插件 v6.0.0
+CM 性能优化插件
 
 功能模块：
 1. 消息缓存 (message_cache) - 缓存 find_messages 查询结果
@@ -21,6 +21,8 @@ CM 性能优化插件 v6.0.0
 
 安装：将目录放入 MaiBot/plugins/ 下，重启 MaiBot
 依赖：无额外依赖（可选：aiofiles, orjson, psutil）
+
+版本信息请参阅 version.py
 """
 
 from __future__ import annotations
@@ -32,6 +34,9 @@ import threading
 import importlib.util
 from pathlib import Path
 from typing import Optional, Dict, Any, Tuple, List, Union
+
+# 统一版本管理
+from version import PLUGIN_VERSION, CONFIG_VERSION, MAIBOT_MIN_VERSION
 
 # 异步优化相关导入
 try:
@@ -111,7 +116,7 @@ except ImportError:
 logger = get_logger("CM_perf_opt")
 
 PLUGIN_NAME = "CM-performance-optimizer"
-PLUGIN_VERSION = "6.0.0"
+# PLUGIN_VERSION 已从 version.py 统一导入
 
 # 全局变量，用于存储动态加载的模块
 _global_modules: Dict[str, Any] = {}
@@ -1302,7 +1307,7 @@ class CMPerformanceOptimizerPlugin(BasePlugin):
                 type=bool, default=True, description="是否启用插件"
             ),
             "config_version": ConfigField(
-                type=str, default="5.2.0", description="配置文件版本"
+                type=str, default=CONFIG_VERSION, description="配置文件版本"
             ),
             "log_level": ConfigField(
                 type=str, default="INFO", description="日志级别"
