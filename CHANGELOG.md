@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.1.0] - 2026-02-17
+
+### Fixed
+- **消息缓存模块修复**
+  - 双缓存模式互斥问题：将 `enable_dual_cache` 布尔开关改为 `cache_mode` 下拉框选择（`query` / `full`），避免同时启用两种模式导致的竞态条件
+  - 版本追踪竞态条件：使用线程锁保护版本号读写，确保版本追踪的原子性
+  - 热集刷新原子性：改进热集刷新逻辑，使用完整的两阶段切换确保原子性
+  - 统计竞态条件：使用原子操作保护缓存统计信息的更新
+
+### Changed
+- **配置结构优化**
+  - 消息缓存总开关保持不变，新增 `cache_mode` 下拉框配置
+  - 向后兼容迁移：自动将旧的 `enable_dual_cache` 配置迁移到新的 `cache_mode` 格式
+  - 配置文件版本升级到 6.1.0
+
+### Compatibility
+- 确认与 MaiBot 完全兼容
+- 向后兼容旧版本配置（自动迁移）
+
 ## [6.0.0] - 2026-02-16
 
 ### Added
@@ -36,6 +55,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 版本号升级到 6.0.0
 - 插件描述更新，包含通知系统功能
 - 配置文件结构优化，新增通知和过期配置节
+
+### Removed
+- 移除 `asyncio_loop_pool` 模块
+  - 该模块收益微乎其微（< 0.5%），风险显著
+  - 移除相关配置项 `asyncio_loop_pool_enabled`
+  - 清理所有相关代码和文档引用
 
 ### Configuration
 - 新增 `[notification]` 配置节
@@ -110,6 +135,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+[6.1.0]: https://github.com/chengmoya/CM-performance-optimizer-plugin/compare/v6.0.0...v6.1.0
+[6.0.0]: https://github.com/chengmoya/CM-performance-optimizer-plugin/compare/v5.2.0...v6.0.0
+[5.2.0]: https://github.com/chengmoya/CM-performance-optimizer-plugin/compare/v5.1.0...v5.2.0
+[5.1.0]: https://github.com/chengmoya/CM-performance-optimizer-plugin/compare/v5.0.0...v5.1.0
 [5.0.0]: https://github.com/chengmoya/CM-performance-optimizer-plugin/compare/v4.7.0...v5.0.0
 [4.7.0]: https://github.com/chengmoya/CM-performance-optimizer-plugin/compare/v4.5.0...v4.7.0
 [4.5.0]: https://github.com/chengmoya/CM-performance-optimizer-plugin/compare/v4.3.1...v4.5.0

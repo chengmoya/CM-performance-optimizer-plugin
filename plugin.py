@@ -567,8 +567,7 @@ class _PerformanceOptimizer:
             enable_db_tuning = True
             db_mmap_size = 268435456
             db_wal_checkpoint_interval = 300
-            enable_asyncio_loop_pool = True
- 
+
             if self._config_manager:
                 enable_lightweight_profiler = self._config_manager.get(
                     "modules.lightweight_profiler_enabled", False
@@ -615,9 +614,6 @@ class _PerformanceOptimizer:
                 )
                 enable_db_tuning = self._config_manager.get(
                     "modules.db_tuning_enabled", True
-                )
-                enable_asyncio_loop_pool = self._config_manager.get(
-                    "modules.asyncio_loop_pool_enabled", True
                 )
                 db_mmap_size = int(self._config_manager.get("modules.db_tuning.mmap_size", 268435456))
                 db_wal_checkpoint_interval = int(
@@ -675,8 +671,30 @@ class _PerformanceOptimizer:
             else:
                 self.logger.info("[PerfOpt] Lightweight profiler 已禁用")
 
-            # 消息缓存
-            if enable_message_cache:
+            # 消息缓存 - 根据 mode 配置选择启动模式
+            message_cache_mode = "query"  # 默认模式
+            if self._config_manager:
+                # 向后兼容：检查旧配置 message_cache_full_enabled
+                legacy_full_enabled = self._config_manager.get(
+                    "modules.message_cache_full_enabled", False
+                )
+                if legacy_full_enabled:
+                    message_cache_mode = "full"
+                    self.logger.info(
+                        "[PerfOpt] 🔄 检测到旧配置 message_cache_full_enabled=True，已自动迁移为 message_cache.mode=full"
+                    )
+                else:
+                    # 读取新的 mode 配置
+                    message_cache_mode = self._config_manager.get(
+                        "message_cache.mode", "query"
+                    )
+
+            # 根据 mode 决定是否启用缓存和具体模式
+            enable_message_cache_query = enable_message_cache and message_cache_mode == "query"
+            enable_message_cache_full = enable_message_cache and message_cache_mode == "full"
+
+            # 消息缓存 - Query 模式（默认）
+            if enable_message_cache_query:
                 try:
                     message_cache_module = _load_local_module(
                         "components/modules/message_cache.py", "CM_perf_opt_message_cache"
@@ -686,11 +704,31 @@ class _PerformanceOptimizer:
                     )
                     if apply_message_cache:
                         apply_message_cache(self.cache_manager)
-                        self.logger.info("[PerfOpt] ✓ 消息缓存补丁已应用")
+                        self.logger.info("[PerfOpt] ✓ 消息缓存 (Query 模式) 已应用")
                 except Exception as e:
                     self.logger.error(f"[PerfOpt] 消息缓存补丁失败: {e}")
             else:
-                self.logger.info("[PerfOpt] 消息缓存已禁用")
+                self.logger.info("[PerfOpt] 消息缓存 (Query 模式) 已禁用")
+
+            # 消息缓存 - Full 模式（全量镜像）
+            if enable_message_cache_full:
+                try:
+                    full_cache_module = _load_local_module(
+                        "full_message_cache.py", "CM_perf_opt_full_message_cache"
+                    )
+                    apply_full_message_cache = getattr(
+                        full_cache_module, "apply_full_message_cache", None
+                    )
+                    if apply_full_message_cache:
+                        apply_full_message_cache(self.cache_manager)
+                        self.logger.info("[PerfOpt] ✓ 消息缓存 (Full 模式) 已应用")
+                except Exception as e:
+                    self.logger.error(f"[PerfOpt] Full 消息缓存补丁失败: {e}")
+            else:
+                if enable_message_cache_query:
+                    self.logger.info(
+                        "[PerfOpt] 消息缓存 (Full 模式) 已禁用（与 Query 模式互斥）"
+                    )
 
             # message_repository count 快速路径（仅 patch count_messages）
             if enable_message_repository_fastpath:
@@ -900,27 +938,7 @@ class _PerformanceOptimizer:
                     self.logger.error(f"[PerfOpt] 错别字生成器缓存补丁失败: {e}")
             else:
                 self.logger.info("[PerfOpt] 错别字生成器缓存补丁已禁用")
- 
-            # asyncio 事件循环池（thread-local，默认关闭，高风险）
-            if enable_asyncio_loop_pool:
-                try:
-                    loop_pool_module = _load_local_module(
-                        "components/modules/asyncio_loop_pool.py",
-                        "CM_perf_opt_asyncio_loop_pool",
-                    )
-                    apply_asyncio_loop_pool = getattr(
-                        loop_pool_module, "apply_asyncio_loop_pool", None
-                    )
-                    if apply_asyncio_loop_pool:
-                        apply_asyncio_loop_pool(self.cache_manager)
-                        self.logger.info(
-                            "[PerfOpt] ✓ asyncio_loop_pool 已启用（thread-local loop）"
-                        )
-                except Exception as e:
-                    self.logger.error(f"[PerfOpt] asyncio_loop_pool 启用失败: {e}")
-            else:
-                self.logger.info("[PerfOpt] asyncio_loop_pool 已禁用（默认关闭）")
- 
+
             # PatchChain 摘要日志（展示冲突链）
             if hasattr(self, "_patch_chain") and self._patch_chain is not None:
                 try:
@@ -1318,7 +1336,11 @@ class CMPerformanceOptimizerPlugin(BasePlugin):
         },
         "modules": {
             "message_cache_enabled": ConfigField(
-                type=bool, default=True, description="是否启用消息缓存"
+                type=bool,
+                default=True,
+                description="是否启用消息缓存",
+                label="📦 消息缓存",
+                order=2,
             ),
             "message_repository_fastpath_enabled": ConfigField(
                 type=bool,
@@ -1365,22 +1387,25 @@ class CMPerformanceOptimizerPlugin(BasePlugin):
             "lightweight_profiler_enabled": ConfigField(
                 type=bool, default=False, description="是否启用轻量性能剖析"
             ),
-            "asyncio_loop_pool_enabled": ConfigField(
-                type=bool, default=True, description="是否启用asyncio_loop_pool"
-            ),
         },
         "message_cache": {
+            "mode": ConfigField(
+                type=str,
+                default="query",
+                description="缓存模式",
+                label="📦 缓存模式",
+                choices=["query", "full"],
+                hint="query: 轻量查询缓存(推荐); full: 完整消息缓存(高内存占用)",
+                order=1,
+            ),
             "per_chat_limit": ConfigField(
-                type=int, default=200, description="每个聊天的缓存消息数量 (50-1000)"
+                type=int, default=200, description="每个聊天的缓存消息数量 (50-1000)", order=2
             ),
             "ttl": ConfigField(
-                type=int, default=300, description="缓存过期时间(秒) (60-3600)"
+                type=int, default=300, description="缓存过期时间(秒) (60-3600)", order=3
             ),
             "max_chats": ConfigField(
-                type=int, default=500, description="最大缓存聊天数 (100-2000)"
-            ),
-            "mode": ConfigField(
-                type=str, default="query", description="缓存模式: query或full"
+                type=int, default=500, description="最大缓存聊天数 (100-2000)", order=4
             ),
             "ignore_time_limit_when_active": ConfigField(
                 type=bool, default=True, description="活跃聊天流是否忽略TTL限制"

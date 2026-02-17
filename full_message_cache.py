@@ -683,20 +683,16 @@ class FullMessageCache:
                 if len(messages) > self.max_messages_per_chat:
                     messages = messages[-self.max_messages_per_chat:]
 
-                # BUG FIX: 检查 chat 是否已存在，避免重复统计
-                chat_already_exists = chat_id in self.buffer_a
-                old_message_count = 0
-                if chat_already_exists:
-                    old_message_count = len(self.buffer_a[chat_id].get("messages", []))
-
-                self.buffer_a[chat_id] = {
-                    "messages": messages,
-                    "ts": time.time(),
-                }
-                self.buffer_a.move_to_end(chat_id)
-
-                # 更新统计（只增加增量，避免重复统计）
+                # 修复问题4: 使用写时复制策略，同时确保统计更新的原子性
+                # 统计更新必须在锁保护下完成，避免竞态条件
                 with self._stats_lock:
+                    # BUG FIX: 检查 chat 是否已存在，避免重复统计
+                    chat_already_exists = chat_id in self.buffer_a
+                    old_message_count = 0
+                    if chat_already_exists:
+                        old_message_count = len(self.buffer_a[chat_id].get("messages", []))
+
+                    # 更新统计（只增加增量，避免重复统计）
                     # 减去旧消息数（如果chat已存在）
                     if chat_already_exists:
                         self._total_messages -= old_message_count
@@ -705,6 +701,13 @@ class FullMessageCache:
                         self._total_chats += 1
                     # 加上新消息数
                     self._total_messages += len(messages)
+
+                # 更新缓存数据（在统计更新之后，避免统计数据不一致）
+                self.buffer_a[chat_id] = {
+                    "messages": messages,
+                    "ts": time.time(),
+                }
+                self.buffer_a.move_to_end(chat_id)
 
                 # LRU淘汰
                 self._evict_if_needed()

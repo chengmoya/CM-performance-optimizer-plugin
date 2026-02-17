@@ -10,10 +10,10 @@
 """
 
 # 插件版本号
-PLUGIN_VERSION = "6.0.0"
+PLUGIN_VERSION = "6.1.0"
 
 # 配置文件版本号 (用于配置迁移)
-CONFIG_VERSION = "6.0.0"
+CONFIG_VERSION = "6.1.0"
 
 # 最小兼容的配置版本
 MIN_COMPATIBLE_VERSION = "1.0.0"

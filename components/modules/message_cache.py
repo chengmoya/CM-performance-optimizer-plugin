@@ -738,6 +738,10 @@ class MessageHotsetCache:
         Args:
             chat_id: 聊天 ID
             force: 是否强制刷新。用于写入侧触发：避免热集在 TTL 内返回旧数据。
+
+        修复问题3: 使用"写时复制"策略，避免刷新期间查询返回空数据。
+        之前是先删除旧数据再加载新数据，期间查询可能返回空。
+        现在是先加载新数据到临时位置，成功后再原子替换旧数据。
         """
         if not self.enabled:
             return
@@ -746,11 +750,7 @@ class MessageHotsetCache:
         now = time.time()
         scheduled = False
         with self._lock:
-            if force:
-                # 写入后强制刷新：避免 TTL 内返回旧数据
-                self._data.pop(cid, None)
-
-            # fresh 就不需要预热
+            # fresh 就不需要预热（仅在非强制刷新时检查）
             if (not force) and self._is_fresh_locked(cid, now):
                 self._touch_locked(cid)
                 return
@@ -782,6 +782,7 @@ class MessageHotsetCache:
 
         async def _warm():
             ok = False
+            new_data = None
             try:
                 from src.common import message_repository
 
@@ -797,8 +798,18 @@ class MessageHotsetCache:
                 )
 
                 now2 = time.time()
+                # 修复问题3: 先构建新数据，成功后再原子替换
+                # 这样在刷新期间，查询仍然可以返回旧数据（即使过期），而不是空
+                new_data = {"ts": now2, "messages": res}
+
                 with self._lock:
-                    self._data[cid] = {"ts": now2, "messages": res}
+                    # 只有在 force=True 时才删除旧数据（在写入之后）
+                    # 否则保留旧数据，直到新数据加载完成
+                    if force:
+                        self._data.pop(cid, None)
+
+                    # 原子替换：直接写入新数据
+                    self._data[cid] = new_data
                     self._data.move_to_end(cid)
 
                     # LRU 淘汰
@@ -1310,32 +1321,39 @@ class MessageCacheModule:
                     orig_store_callable = getattr(MessageStorage, "store_message", None)
 
                     async def patched_store_message(message, chat_stream):
+                        # 修复问题2: 将版本递增移到数据库写入之前，避免竞态条件
+                        # 先递增版本，确保在写入之前就使缓存失效
+                        try:
+                            # 通知消息不参与版本递增（与原逻辑一致）
+                            if not getattr(message, "is_notify", False):
+                                chat_id = getattr(chat_stream, "stream_id", None)
+                                if chat_id:
+                                    # 版本递增必须在数据库写入之前执行，确保查询侧看到的版本是最新的
+                                    _chat_versions.bump(str(chat_id))
+                                    if hasattr(module.stats, "write_bump"):
+                                        module.stats.write_bump()
+                        except Exception:
+                            # 版本递增失败不应影响主流程，继续执行写入
+                            pass
+
+                        # 执行原始的数据库写入操作
                         if callable(orig_store_callable):
                             await cast(
                                 Callable[[Any, Any], Awaitable[None]],
                                 orig_store_callable,
                             )(message, chat_stream)
+
+                        # 写入后：避免 hotset 在 TTL 内返回旧数据 -> 强制刷新
                         try:
-                            # 通知消息不参与版本递增（与原逻辑一致）
-                            if getattr(message, "is_notify", False):
-                                return
-
-                            chat_id = getattr(chat_stream, "stream_id", None)
-                            if chat_id:
-                                _chat_versions.bump(str(chat_id))
-                                if hasattr(module.stats, "write_bump"):
-                                    module.stats.write_bump()
-
-                                # 写入后：避免 hotset 在 TTL 内返回旧数据 -> 强制刷新
-                                try:
+                            if not getattr(message, "is_notify", False):
+                                chat_id = getattr(chat_stream, "stream_id", None)
+                                if chat_id:
                                     module.hotset.ensure_warmup(str(chat_id), force=True)
                                     if hasattr(module.stats, "write_invalidate_hotset"):
                                         module.stats.write_invalidate_hotset()
-                                except Exception:
-                                    pass
                         except Exception:
-                            # 版本递增/热集触发失败不应影响主流程
-                            return
+                            # 热集刷新失败不应影响主流程
+                            pass
 
                     # PatchChain 注册 store_message
                     if _pc is not None:

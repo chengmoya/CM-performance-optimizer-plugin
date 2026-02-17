@@ -1,6 +1,6 @@
 # CM-performance-optimizer（性能优化插件）
 
-[![Version](https://img.shields.io/badge/version-6.0.0-blue.svg)](https://github.com/chengmoya/CM-performance-optimizer-plugin)
+[![Version](https://img.shields.io/badge/version-6.1.0-blue.svg)](https://github.com/chengmoya/CM-performance-optimizer-plugin)
 
 > **注意**：插件版本号已统一管理在 [`version.py`](version.py) 文件中。
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
@@ -49,7 +49,6 @@ CM-performance-optimizer 是一个面向 MaiBot 的全栈性能优化插件，�
 | **db_tuning** | SQLite 运行时参数调优 | PRAGMA 配置 + 索引自检 |
 | **message_repository_fastpath** | 消息计数快速路径 | COUNT + 短 TTL 缓存 |
 | **jargon_matcher_automaton** | 黑话匹配加速 | Aho-Corasick 自动机算法 |
-| **asyncio_loop_pool** | 线程本地事件循环池 | 避免频繁创建事件循环 |
 
 ### 通知系统
 
@@ -136,7 +135,7 @@ CM-performance-optimizer 是一个面向 MaiBot 的全栈性能优化插件，�
 | 配置项 | 类型 | 默认值 | 说明 |
 |-------|------|-------|------|
 | `enabled` | boolean | `true` | 是否启用插件 |
-| `config_version` | string | `"6.0.0"` | 配置文件版本（用于配置迁移，请勿手动修改） |
+| `config_version` | string | `"6.1.0"` | 配置文件版本（用于配置迁移，请勿手动修改） |
 | `log_level` | string | `"INFO"` | 日志级别，可选值：`DEBUG`、`INFO`、`WARNING`、`ERROR`、`CRITICAL` |
 
 ### 功能模块开关
@@ -157,7 +156,6 @@ CM-performance-optimizer 是一个面向 MaiBot 的全栈性能优化插件，�
 | `typo_generator_cache_enabled` | boolean | `true` | 错别字生成器缓存开关 |
 | `db_tuning_enabled` | boolean | `true` | SQLite 数据库调优开关 |
 | `lightweight_profiler_enabled` | boolean | `false` | 轻量性能剖析器开关 |
-| `asyncio_loop_pool_enabled` | boolean | `false` | 异步事件循环池开关（高风险，默认关闭） |
 
 ### 消息缓存配置
 
@@ -169,6 +167,8 @@ CM-performance-optimizer 是一个面向 MaiBot 的全栈性能优化插件，�
 | `mode` | string | `"query"` | `query` / `full` | 缓存模式：`query` 仅缓存查询结果，`full` 缓存完整消息数据 |
 | `ignore_time_limit_when_active` | boolean | `true` | - | 活跃聊天的缓存是否忽略 TTL 限制 |
 | `active_time_window` | integer | `300` | 60-1800 | 判断聊天是否活跃的时间窗口（秒） |
+
+> **注意**：从 v6.1.0 起，`mode` 配置项改为下拉框选择，替代了旧版本的 `enable_dual_cache` 布尔开关。插件会自动迁移旧配置。
 
 ### 人物信息缓存配置
 
@@ -196,7 +196,7 @@ CM-performance-optimizer 是一个面向 MaiBot 的全栈性能优化插件，�
 
 ### 黑话缓存配置
 
-| 配置项 | 类型 | 默认值 | ���束范围 | 说明 |
+| 配置项 | 类型 | 默认值 | 约束范围 | 说明 |
 |-------|------|-------|---------|------|
 | `batch_size` | integer | `100` | 50-500 | 批量处理大小 |
 | `batch_delay` | float | `0.05` | 0.01-0.5 | 批量处理延迟（秒） |
@@ -436,10 +436,11 @@ stats_interval = 30
 
 - **MaiBot 版本**：要求 >= 0.12.0，建议使用最新 main 分支
 - **Python 版本**：要求 >= 3.8
+- **配置兼容性**：v6.1.0 自动兼容旧版本配置（自动迁移）
 
 ### 高风险模块
 
-- **asyncio_loop_pool**：属于"运行时行为改变"类优化，可能影响与其他插件/线程模型的兼容性，**默认关闭**。启用前请充分测试。
+（已移除 asyncio_loop_pool 模块）
 
 ### 通知系统
 
@@ -454,6 +455,24 @@ stats_interval = 30
 ---
 
 ## 更新日志
+
+### [6.1.0] - 2026-02-17
+
+#### 修复
+- **消息缓存模块修复**
+  - 双缓存模式互斥问题：将 `enable_dual_cache` 布尔开关改为 `cache_mode` 下拉框选择（`query` / `full`），避免同时启用两种模式导致的竞态条件
+  - 版本追踪竞态条件：使用线程锁保护版本号读写，确保版本追踪的原子性
+  - 热集刷新原子性：改进热集刷新逻辑，使用完整的两阶段切换确保原子性
+  - 统计竞态条件：使用原子操作保护缓存统计信息的更新
+
+#### 变更
+- 配置结构优化：消息缓存总开关保持不变，新增 `cache_mode` 下拉框配置
+- 向后兼容迁移：自动将旧的 `enable_dual_cache` 配置迁移到新的 `cache_mode` 格式
+- 配置文件版本升级到 6.1.0
+
+#### 兼容性
+- 确认与 MaiBot 完全兼容
+- 向后兼容旧版本配置（自动迁移）
 
 ### [6.0.0] - 2026-02-16
 
@@ -503,7 +522,6 @@ stats_interval = 30
 - 拼写错误生成器缓存（typo_generator_cache）
 - Levenshtein 距离加速模块（levenshtein_fast）
 - 轻量级性能分析器（lightweight_profiler）
-- 异步循环池（asyncio_loop_pool）
 - 数据库调优模块（db_tuning）
 - 正则预编译模块（regex_precompile）
 - 用户引用批量解析（user_reference_batch_resolve）
