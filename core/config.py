@@ -670,13 +670,6 @@ class ConfigManager:
                 section="modules",
                 order=13,
             ),
-            "asyncio_loop_pool_enabled": ExtendedConfigField(
-                field_type=ConfigFieldType.BOOL,
-                default=True,
-                description="是否启用asyncio_loop_pool",
-                section="modules",
-                order=14,
-            ),
         }
 
     def _build_message_cache_schema(self) -> Dict[str, ExtendedConfigField]:
@@ -1318,7 +1311,6 @@ regex_precompile_enabled = true         # 是否启用正则表达式预编译
 typo_generator_cache_enabled = true     # 是否启用错别字生成器缓存
 db_tuning_enabled = true                # 是否启用SQLite数据库调优
 lightweight_profiler_enabled = false    # 是否启用轻量性能剖析器
-asyncio_loop_pool_enabled = true        # 是否启用异步事件循环池
 
 # ============ 消息缓存配置 ============
 [message_cache]

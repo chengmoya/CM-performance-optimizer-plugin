@@ -325,7 +325,6 @@ class ModuleEnabler:
             "regex_precompile": "modules.regex_precompile_enabled",
             "typo_generator_cache": "modules.typo_generator_cache_enabled",
             "lightweight_profiler": "modules.lightweight_profiler_enabled",
-            "asyncio_loop_pool": "modules.asyncio_loop_pool_enabled",
             "db_tuning": "modules.db_tuning_enabled",
         }
 
