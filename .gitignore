@@ -35,3 +35,15 @@ config.toml.backup*
 # OS
 .DS_Store
 Thumbs.db
+
+# 开发过程文档（保留本地，不提交）
+CONFIG_FORMAT_REPORT.md
+CONFIG_VALIDATION_REPORT.md
+IMPLEMENTATION_SUMMARY.md
+TEST_PLAN.md
+
+# 测试文件（保留本地，不提交）
+test_*.py
+
+# 本地开发工具
+.roo/
