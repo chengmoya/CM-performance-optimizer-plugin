@@ -24,7 +24,6 @@ import importlib.util
 import sys
 import threading
 import time
-from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple
@@ -271,20 +270,13 @@ class PyACAutomaton:
 class AutomatonManager:
     """管理每个 chat 维度的自动机（带重建间隔、缓存源优先）。"""
 
-    def __init__(
-        self,
-        cache_manager: Any,
-        rebuild_interval: int = 300,
-        max_automatons: int = 100,
-    ) -> None:
+    def __init__(self, cache_manager: Any, rebuild_interval: int = 300) -> None:
         self._cache_manager = cache_manager
         self._lock = threading.Lock()
         self._rebuild_interval = max(30, int(rebuild_interval))
-        self._max_automatons = max(1, int(max_automatons))
 
         # key -> (automaton, meta_map, built_at, backend, jargon_count)
-        # 使用 OrderedDict 维护 LRU：命中时 move_to_end，超量时 popitem(last=False)
-        self._automatons: "OrderedDict[str, Tuple[Any, Dict[str, _JargonMeta], float, str, int]]" = OrderedDict()
+        self._automatons: Dict[str, Tuple[Any, Dict[str, _JargonMeta], float, str, int]] = {}
 
         # 统计
         self.builds = 0
@@ -371,7 +363,6 @@ class AutomatonManager:
             if cached and not force_rebuild:
                 age = time.time() - float(cached[2])
                 if age < self._rebuild_interval:
-                    self._automatons.move_to_end(key)
                     self.cache_hits += 1
                     return cached[0], cached[1]
 
@@ -449,25 +440,17 @@ class AutomatonManager:
             finalize()
 
             built_at = time.time()
-            evicted = 0
             with self._lock:
                 if forced:
                     self.rebuilds += 1
                 else:
                     self.builds += 1
-
-                if key in self._automatons:
-                    self._automatons.move_to_end(key)
                 self._automatons[key] = (automaton, meta_map, built_at, backend, len(meta_map))
-
-                while len(self._automatons) > self._max_automatons:
-                    self._automatons.popitem(last=False)
-                    evicted += 1
 
             dt = time.time() - t0
             logger.debug(
                 f"[JargonMatcherAutomaton] 自动机构建完成 key={key} backend={backend} "
-                f"jargons={len(meta_map)} dt={dt:.3f}s evicted={evicted}"
+                f"jargons={len(meta_map)} dt={dt:.3f}s"
             )
 
             return automaton, meta_map
@@ -886,8 +869,6 @@ class JargonMatcherAutomatonModule:
             "automaton_rebuilds": int(self._automaton_manager.rebuilds),
             "automaton_cache_hits": int(self._automaton_manager.cache_hits),
             "automaton_cache_misses": int(self._automaton_manager.cache_misses),
-            "automaton_cache_size": int(len(self._automaton_manager._automatons)),
-            "automaton_max_size": int(self._automaton_manager._max_automatons),
         }
 
         try:
@@ -938,25 +919,14 @@ def apply_jargon_matcher_automaton(
     """工厂函数：创建模块、注册到 cache_manager 并应用补丁。"""
 
     try:
-        max_automatons = 100
-        if isinstance(options, dict):
-            try:
-                max_automatons = max(1, int(options.get("max_automatons", 100)))
-            except (TypeError, ValueError):
-                max_automatons = 100
-
         mod = JargonMatcherAutomatonModule(cache_manager)
-        mod._automaton_manager._max_automatons = max_automatons
         if isinstance(options, dict):
             mod._messages_stream_scan_enabled = bool(
                 options.get("messages_stream_scan_enabled", False)
             )
         cache_manager.register_cache("jargon_matcher_automaton", mod)
         mod.apply_patch()
-        logger.info(
-            "[JargonMatcherAutomaton] ✓ 模块已初始化 (max_automatons=%s)",
-            max_automatons,
-        )
+        logger.info("[JargonMatcherAutomaton] ✓ 模块已初始化")
         return mod
     except Exception as e:
         logger.error(f"[JargonMatcherAutomaton] 初始化失败: {e}")

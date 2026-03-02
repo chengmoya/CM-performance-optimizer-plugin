@@ -20,6 +20,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Set
 
+from .direct_notification import DirectNotificationSender
+
 try:
     from src.common.logger import get_logger
 except ImportError:
@@ -158,7 +160,11 @@ class NotificationManager:
                     cls._instance._initialized = False
         return cls._instance
 
-    def __init__(self, config: Optional[NotificationConfig] = None):
+    def __init__(
+        self,
+        config: Optional[NotificationConfig] = None,
+        direct_sender: Optional[DirectNotificationSender] = None,
+    ):
         if self._initialized:
             return
         self._initialized = True
@@ -166,6 +172,7 @@ class NotificationManager:
         self._config = config or NotificationConfig()
         self._channels: Dict[str, Any] = {}  # 渠道实例
         self._lock = threading.RLock()
+        self._direct_sender = direct_sender
 
         # 去重缓存
         self._dedup_cache: Dict[str, float] = {}
@@ -258,6 +265,11 @@ class NotificationManager:
                 self._channels["qq"].set_bot_instance(bot_instance)
                 self._channels["qq"].enable()
                 logger.info("[NotificationManager] QQ渠道已启用")
+
+    def set_direct_sender(self, direct_sender: Optional[DirectNotificationSender]):
+        """设置直连通知发送器"""
+        with self._lock:
+            self._direct_sender = direct_sender
 
     def set_api_client(self, api_client: Any):
         """设置API客户端
@@ -475,6 +487,30 @@ class NotificationManager:
             logger.warning("[NotificationManager] 通知被频率限制")
             return False
 
+        # QQ 模式优先走直连发送
+        if self._config.mode == "qq" and self._direct_sender is not None:
+            try:
+                direct_ok = await self._direct_sender.send(
+                    title=message.title,
+                    message=message.content,
+                    level=message.level.value,
+                )
+                if direct_ok:
+                    self._record_notification(
+                        dedup_key=dedup_key,
+                        template_key=template_key,
+                        level=message.level.value,
+                        content_hash=dedup_key.split(":")[-1],
+                        send_success=True,
+                    )
+                    self._stats["total_sent"] += 1
+                    logger.info("[NotificationManager] 通过直连模式发送成功")
+                    return True
+
+                logger.warning("[NotificationManager] 直连发送失败，回退到渠道模式")
+            except Exception as e:
+                logger.error(f"[NotificationManager] 直连发送异常，回退到渠道模式: {e}")
+
         # 获取活跃渠道
         channels = self._get_active_channels()
         if not channels:
@@ -639,6 +675,37 @@ class NotificationManager:
             self._notification_records.clear()
             logger.info("[NotificationManager] 统计信息已重置")
 
+    @classmethod
+    def reset(cls) -> None:
+        """重置单例状态（用于热重载场景）
+        
+        此方法会：
+        1. 清空所有渠道和缓存
+        2. 重置统计信息
+        3. 重置单例实例为 None
+        
+        线程安全：使用类锁确保原子操作
+        """
+        with cls._lock:
+            if cls._instance is not None:
+                try:
+                    with cls._instance._lock:
+                        cls._instance._channels.clear()
+                        cls._instance._dedup_cache.clear()
+                        cls._instance._send_history.clear()
+                        cls._instance._notification_records.clear()
+                        cls._instance._stats = {
+                            "total_sent": 0,
+                            "total_failed": 0,
+                            "total_deduped": 0,
+                            "total_rate_limited": 0,
+                        }
+                    logger.debug("[NotificationManager] 单例已重置")
+                except Exception as e:
+                    logger.error(f"[NotificationManager] 重置失败: {e}")
+                finally:
+                    cls._instance = None
+
 
 # 全局实例获取函数
 _notification_manager: Optional[NotificationManager] = None
@@ -646,6 +713,7 @@ _notification_manager: Optional[NotificationManager] = None
 
 def get_notification_manager(
     config: Optional[NotificationConfig] = None,
+    direct_sender: Optional[DirectNotificationSender] = None,
 ) -> NotificationManager:
     """获取通知管理器实例
 
@@ -657,11 +725,14 @@ def get_notification_manager(
     """
     global _notification_manager
     if _notification_manager is None:
-        _notification_manager = NotificationManager(config)
+        _notification_manager = NotificationManager(config, direct_sender=direct_sender)
     return _notification_manager
 
 
-def init_notification_manager(config: NotificationConfig) -> NotificationManager:
+def init_notification_manager(
+    config: NotificationConfig,
+    direct_sender: Optional[DirectNotificationSender] = None,
+) -> NotificationManager:
     """初始化通知管理器
 
     Args:
@@ -671,5 +742,5 @@ def init_notification_manager(config: NotificationConfig) -> NotificationManager
         通知管理器实例
     """
     global _notification_manager
-    _notification_manager = NotificationManager(config)
+    _notification_manager = NotificationManager(config, direct_sender=direct_sender)
     return _notification_manager

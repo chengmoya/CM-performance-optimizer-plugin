@@ -202,7 +202,32 @@ class TypoGeneratorCacheModule:
         self._pinyin_dict: Optional[Any] = None
 
         # 缓存路径（与 MaiBot 自身依赖数据目录保持一致）
+        # P1 修复：添加路径安全验证，防止路径遍历攻击
         self._pinyin_cache_path = Path("depends-data") / "pinyin_dict_cache.json"
+        try:
+            # 尝试导入路径验证函数
+            try:
+                from core.compat import validate_file_path
+            except ImportError:
+                # 回退��义
+                def validate_file_path(file_path, base_dir, allow_create=False):
+                    """Fallback validate_file_path 实现"""
+                    file_path = Path(file_path).resolve()
+                    base_dir = Path(base_dir).resolve()
+                    try:
+                        file_path.relative_to(base_dir)
+                    except ValueError:
+                        raise ValueError(f"路径遍历风险: '{file_path}' 不在 '{base_dir}' 内")
+                    return file_path
+
+            # 验证缓存路径在当前工作目录内
+            base_dir = Path.cwd()
+            validated_path = validate_file_path(self._pinyin_cache_path, base_dir, allow_create=True)
+            self._pinyin_cache_path = validated_path
+            logger.debug(f"[TypoGeneratorCache] 缓存路径验证通过: {self._pinyin_cache_path}")
+        except (ValueError, Exception) as e:
+            logger.warning(f"[TypoGeneratorCache] 路径安全验证失败，使用原始路径: {e}")
+            # 保持原始路径，后续操作会在实际访问时失败
 
     def apply_patch(self) -> None:
         """应用 monkey-patch。"""

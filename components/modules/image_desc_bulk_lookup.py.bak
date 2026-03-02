@@ -19,7 +19,7 @@ import re
 import sys
 import threading
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, Optional
 
 try:
     from src.common.logger import get_logger
@@ -149,7 +149,7 @@ def _stats_miss(stats: Any) -> None:
 class ImageDescBulkLookupModule:
     """image_desc_bulk_lookup 批量查询替换补丁模块。"""
 
-    def __init__(self, max_batch_size: int = 100):
+    def __init__(self):
         """初始化统计与状态。"""
 
         self.stats = ModuleStats("image_desc_bulk_lookup")
@@ -167,8 +167,6 @@ class ImageDescBulkLookupModule:
         self._bulk_queries = 0
         self._saved_queries = 0
         self._fallbacks = 0
-        self._max_batch_size = max(1, int(max_batch_size))
-        self._batch_chunks = 0
 
     def apply_patch(self) -> None:
         """应用 monkey-patch。"""
@@ -235,36 +233,30 @@ class ImageDescBulkLookupModule:
 
                     desc_to_id: Dict[str, str] = {}
 
-                    # 第二步：分批批量查询（WHERE IN）
+                    # 第二步：单次批量查询（WHERE IN）
                     try:
                         from src.common.database.database_model import Images
 
-                        chunks: List[List[str]] = []
-                        if len(descriptions) <= module._max_batch_size:
-                            chunks = [descriptions]
-                        else:
-                            for i in range(0, len(descriptions), module._max_batch_size):
-                                chunks.append(descriptions[i : i + module._max_batch_size])
+                        images = (
+                            Images.select()
+                            .where(Images.description.in_(descriptions))
+                            .order_by(Images.timestamp.desc())
+                        )
 
-                        for chunk in chunks:
-                            if not chunk:
-                                continue
-                            images = (
-                                Images.select()
-                                .where(Images.description.in_(chunk))
-                                .order_by(Images.timestamp.desc())
-                            )
-                            for img in images:
-                                # 由于已按 timestamp desc 排序，首次写入即最新
+                        for img in images:
+                            # 由于已按 timestamp desc 排序，首次写入即最新
+                            try:
                                 desc = str(getattr(img, "description", ""))
-                                if not desc or desc in desc_to_id:
+                                if not desc:
                                     continue
-                                desc_to_id[desc] = str(getattr(img, "image_id"))
+                                if desc not in desc_to_id:
+                                    desc_to_id[desc] = str(getattr(img, "image_id"))
+                            except Exception:
+                                continue
 
                         with module._lock:
                             module._bulk_queries += 1
                             module._saved_queries += max(0, match_count - 1)
-                            module._batch_chunks += max(0, len(chunks) - 1)
 
                         _stats_hit(module.stats)
 
@@ -359,8 +351,6 @@ class ImageDescBulkLookupModule:
                 "bulk_queries": int(self._bulk_queries),
                 "saved_queries": int(self._saved_queries),
                 "fallbacks": int(self._fallbacks),
-                "max_batch_size": int(self._max_batch_size),
-                "batch_chunks": int(self._batch_chunks),
             }
 
     def get_memory_usage(self) -> int:
@@ -369,22 +359,14 @@ class ImageDescBulkLookupModule:
         return 0
 
 
-def apply_image_desc_bulk_lookup(
-    cache_manager,
-    config: Optional[Dict[str, Any]] = None,
-) -> Optional[ImageDescBulkLookupModule]:
+def apply_image_desc_bulk_lookup(cache_manager) -> Optional[ImageDescBulkLookupModule]:
     """工厂函数：创建模块、注册到 cache_manager 并应用补丁。"""
 
     try:
-        cfg = config or {}
-        max_batch_size = int(cfg.get("max_batch_size", 100))
-        mod = ImageDescBulkLookupModule(max_batch_size=max_batch_size)
+        mod = ImageDescBulkLookupModule()
         cache_manager.register_cache("image_desc_bulk_lookup", mod)
         mod.apply_patch()
-        logger.info(
-            "[ImageDescBulkLookup] ✓ 模块已初始化 (max_batch_size=%s)",
-            max_batch_size,
-        )
+        logger.info("[ImageDescBulkLookup] ✓ 模块已初始化")
         return mod
     except Exception as e:
         logger.error(f"[ImageDescBulkLookup] 初始化失败: {e}")

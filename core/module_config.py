@@ -61,39 +61,55 @@ class ModuleConfigMapper:
         """构建配置路径到模块属性的映射
 
         格式: {配置路径: {模块名: 属性名}}
+        
+        注意：配置路径使用扁平化格式，与 schema 定义一致：
+        - 模块开关: modules.message_cache_enabled (而非 modules.message_cache.enabled)
+        - 模块详细配置: message_cache.per_chat_limit (顶层配置节)
         """
         return {
-            # 消息缓存模块配置
-            "modules.message_cache.enabled": {"message_hotset": "enabled"},
-            "modules.message_cache.per_chat_limit": {"message_hotset": "per_chat_limit"},
-            "modules.message_cache.ttl": {"message_hotset": "ttl"},
-            "modules.message_cache.max_chats": {"message_hotset": "max_chats"},
-            "modules.message_cache.ignore_time_limit_when_active": {
+            # 消息缓存模块开关（扁平化）
+            "modules.message_cache_enabled": {"message_hotset": "enabled"},
+            # 消息缓存详细配置（顶层配置节）
+            "message_cache.per_chat_limit": {"message_hotset": "per_chat_limit"},
+            "message_cache.ttl": {"message_hotset": "ttl"},
+            "message_cache.max_chats": {"message_hotset": "max_chats"},
+            "message_cache.ignore_time_limit_when_active": {
                 "message_hotset": "ignore_time_limit_when_active"
             },
-            "modules.message_cache.active_time_window": {"message_hotset": "active_time_window"},
-            # 人物缓存模块配置
-            "modules.person_cache.max_size": {"person_cache": "cache.max_size"},
-            "modules.person_cache.ttl": {"person_cache": "cache.ttl"},
-            "modules.person_cache.warmup_enabled": {"person_warmup": "enabled"},
-            "modules.person_cache.warmup_per_chat_sample": {
+            "message_cache.active_time_window": {"message_hotset": "active_time_window"},
+            "message_cache.absolute_ttl_multiplier": {
+                "message_hotset": "absolute_ttl_multiplier"
+            },
+            # 人物缓存模块开关（扁平化）
+            "modules.person_cache_enabled": {"person_cache": "enabled"},
+            # 人物缓存详细配置
+            "person_cache.max_size": {"person_cache": "cache.max_size"},
+            "person_cache.ttl": {"person_cache": "cache.ttl"},
+            "person_cache_expiration.warmup_enabled": {"person_warmup": "enabled"},
+            "person_cache_expiration.warmup_per_chat_sample": {
                 "person_warmup": "per_chat_message_sample"
             },
-            "modules.person_cache.warmup_max_persons": {"person_warmup": "max_persons_per_chat"},
-            "modules.person_cache.warmup_ttl": {"person_warmup": "ttl"},
-            "modules.person_cache.warmup_debounce": {"person_warmup": "debounce_seconds"},
-            # 表达式缓存模块配置
-            "modules.expression_cache.refresh_interval": {"expression_cache": "refresh_interval"},
-            # 黑话缓存模块配置
-            "modules.jargon_cache.refresh_interval": {"jargon_cache": "refresh_interval"},
-            # 知识图谱缓存模块配置
-            "modules.kg_cache.refresh_interval": {"kg_cache": "refresh_interval"},
+            "person_cache_expiration.warmup_max_persons": {"person_warmup": "max_persons_per_chat"},
+            "person_cache_expiration.warmup_ttl": {"person_warmup": "ttl"},
+            "person_cache_expiration.warmup_debounce": {"person_warmup": "debounce_seconds"},
+            # 表达式缓存模块开关（扁平化）
+            "modules.expression_cache_enabled": {"expression_cache": "enabled"},
+            # 表达式缓存详细配置
+            "expression_cache.refresh_interval": {"expression_cache": "refresh_interval"},
+            # 黑话缓存模块开关（扁平化）
+            "modules.jargon_cache_enabled": {"jargon_cache": "enabled"},
+            # 黑话缓存详细配置
+            "jargon_cache.refresh_interval": {"jargon_cache": "refresh_interval"},
+            # 知识图谱缓存模块开关（扁平化）
+            "modules.kg_cache_enabled": {"kg_cache": "enabled"},
+            # 知识图谱缓存详细配置
+            "kg_cache.refresh_interval": {"kg_cache": "refresh_interval"},
             # 监控配置
             "monitoring.stats_interval": {"stats_reporter": "report_interval"},
             "monitoring.memory_warning_threshold": {"memory_monitor": "warning_threshold"},
             "monitoring.memory_critical_threshold": {"memory_monitor": "critical_threshold"},
             # Lightweight profiler 配置
-            "performance.profiler_sample_rate": {"lightweight_profiler": "sample_rate"},
+            "lightweight_profiler.sample_rate": {"lightweight_profiler": "sample_rate"},
         }
 
     def register_module(self, name: str, instance: Any):
@@ -331,6 +347,29 @@ class ModuleEnabler:
         for module_name, config_path in module_enable_paths.items():
             enabled = config_manager.get(config_path, True)
             self.set_enabled(module_name, enabled)
+
+
+    @classmethod
+    def reset(cls) -> None:
+        """重置单例状态（用于热重载场景）
+        
+        此方法会：
+        1. 清空所有模块实例和回调
+        2. 重置单例实例为 None
+        
+        线程安全：使用类锁确保原子操作
+        """
+        with cls._lock:
+            if cls._instance is not None:
+                try:
+                    with cls._instance._mapping_lock:
+                        cls._instance._module_instances.clear()
+                        cls._instance._update_callbacks.clear()
+                    logger.debug("[ModuleConfigMapper] 单例已重置")
+                except Exception as e:
+                    logger.error(f"[ModuleConfigMapper] 重置失败: {e}")
+                finally:
+                    cls._instance = None
 
 
 # 全局实例

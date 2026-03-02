@@ -274,6 +274,8 @@ class ConfigMigrator:
         self._migrations["4.0.0->5.0.0"] = self._migrate_4_0_to_5_0
         self._migrations["5.0.0->5.1.0"] = self._migrate_5_0_to_5_1
         self._migrations["5.1.0->5.2.0"] = self._migrate_5_1_to_5_2
+        self._migrations["5.2.0->6.0.0"] = self._migrate_5_2_to_6_0
+        self._migrations["6.0.0->6.1.0"] = self._migrate_6_0_to_6_1
 
     def _migrate_1_0_to_2_0(self, config: Dict) -> Dict:
         """从 1.0.0 迁移到 2.0.0"""
@@ -443,6 +445,65 @@ class ConfigMigrator:
         
         return new_config
 
+    def _migrate_5_2_to_6_0(self, config: Dict) -> Dict:
+        """从 5.2.0 迁移到 6.0.0
+        
+        变更说明：
+        - 重构模块配置结构，扁平化模块开关
+        - 将 modules.message_cache.enabled 迁移到 modules.message_cache_enabled
+        - 统一配置映射路径格式
+        """
+        new_config = copy.deepcopy(config)
+        
+        # 扁平化模块开关配置
+        if "modules" in new_config:
+            modules = new_config["modules"]
+            
+            # 处理嵌套的模块配置
+            nested_module_configs = ["message_cache", "person_cache", "expression_cache",
+                                     "jargon_cache", "kg_cache"]
+            
+            for module_name in nested_module_configs:
+                if module_name in modules and isinstance(modules[module_name], dict):
+                    module_cfg = modules[module_name]
+                    # 如果有 enabled 字段，提取到顶层
+                    if "enabled" in module_cfg:
+                        enabled_key = f"{module_name}_enabled"
+                        if enabled_key not in modules:
+                            modules[enabled_key] = module_cfg.pop("enabled")
+                    # 如果模块配置只剩 enabled 或为空，删除该嵌套节
+                    if len(module_cfg) == 0 or (len(module_cfg) == 1 and "enabled" in module_cfg):
+                        modules.pop(module_name, None)
+        
+        if "plugin" not in new_config:
+            new_config["plugin"] = {}
+        new_config["plugin"]["config_version"] = "6.0.0"
+        
+        return new_config
+
+    def _migrate_6_0_to_6_1(self, config: Dict) -> Dict:
+        """从 6.0.0 迁移到 6.1.0
+        
+        变更说明：
+        - 添加 full_message_cache 相关配置
+        - 添加 message_cache.mode 配置项
+        - 无破坏性变更
+        """
+        new_config = copy.deepcopy(config)
+        
+        # 确保 message_cache 配置节存在且有 mode 字段
+        if "message_cache" not in new_config:
+            new_config["message_cache"] = {}
+        
+        if "mode" not in new_config["message_cache"]:
+            new_config["message_cache"]["mode"] = "query"
+        
+        if "plugin" not in new_config:
+            new_config["plugin"] = {}
+        new_config["plugin"]["config_version"] = "6.1.0"
+        
+        return new_config
+
     def migrate(self, config: Dict) -> Dict:
         """执行配置迁移"""
         current_version = config.get("plugin", {}).get("config_version", "1.0.0")
@@ -456,7 +517,7 @@ class ConfigMigrator:
         # 注意：每个版本变更都应在此链中有对应条目
         # 中间版本若无破坏性变更，迁移函数可为空操作（仅更新版本号）
         version_chain = [
-            "1.0.0", "2.0.0", "3.0.0", "4.0.0", "5.0.0", "5.1.0", "5.2.0"
+            "1.0.0", "2.0.0", "3.0.0", "4.0.0", "5.0.0", "5.1.0", "5.2.0", "6.0.0", "6.1.0"
         ]
         start_idx = -1
 
@@ -1292,7 +1353,7 @@ class ConfigManager:
 # ============ 插件基本配置 ============
 [plugin]
 enabled = true                          # 是否启用插件
-config_version = "2.0.0"                # 配置文件版本
+config_version = "6.1.0"                # 配置文件版本
 log_level = "INFO"                      # 日志级别 (DEBUG/INFO/WARNING/ERROR/CRITICAL)
 
 # ============ 功能模块开关 ============
@@ -1572,6 +1633,19 @@ max_size = 3000                         # 最大缓存大��� (500-10000)
                 if not valid:
                     errors.append(f"{section_name}.{field_name}: {error}")
 
+        # P1 修复：添加内存阈值逻辑约束验证
+        # 确保 warning_threshold < critical_threshold
+        monitoring_config = self._config.get("monitoring", {})
+        warning_threshold = monitoring_config.get("memory_warning_threshold")
+        critical_threshold = monitoring_config.get("memory_critical_threshold")
+
+        if warning_threshold is not None and critical_threshold is not None:
+            if warning_threshold >= critical_threshold:
+                errors.append(
+                    f"monitoring.memory_warning_threshold ({warning_threshold}) 必须 "
+                    f"小于 monitoring.memory_critical_threshold ({critical_threshold})"
+                )
+
         return errors
 
     def get(self, path: str, default: Any = None) -> Any:
@@ -1689,6 +1763,29 @@ max_size = 3000                         # 最大缓存大��� (500-10000)
                 field_def = self._get_field_def(path)
                 if field_def:
                     self.set(path, field_def.default)
+
+
+    @classmethod
+    def reset(cls) -> None:
+        """重置单例状态（用于热重载场景）
+        
+        此方法会：
+        1. 清空配置缓存
+        2. 重置单例实例为 None
+        
+        线程安全：使用类锁确保原子操作
+        """
+        with cls._lock:
+            if cls._instance is not None:
+                try:
+                    with cls._instance._config_lock:
+                        cls._instance._config.clear()
+                        cls._instance._schema.clear()
+                    logger.debug("[ConfigManager] 单例已重置")
+                except Exception as e:
+                    logger.error(f"[ConfigManager] 重置失败: {e}")
+                finally:
+                    cls._instance = None
 
 
 # 便捷函数

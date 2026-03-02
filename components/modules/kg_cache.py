@@ -480,6 +480,7 @@ class KGCacheModule:
         self.batch_size = max(1, int(batch_size))
         self.batch_delay = max(0.001, float(batch_delay))
         self.refresh_interval = max(60, int(refresh_interval))
+        self._yield_batch_size = max(200, self.batch_size * 10)
         
         # 状态
         self.loading = False
@@ -504,13 +505,17 @@ class KGCacheModule:
         self._degraded_mode = not self.CACHE_ENABLED
 
         # 文件变更追踪器（用于增量更新检测）
+        # 包含 mtime/size 快速检测和 hash 精确检测
         self._tracker: Dict[str, Any] = {
             "graph_mtime": 0.0,
             "graph_size": 0,
+            "graph_hash": "",  # 文件内容哈希（用于精确检测）
             "ent_cnt_mtime": 0.0,
             "ent_cnt_size": 0,
+            "ent_cnt_hash": "",  # 文件内容哈希
             "pg_hash_mtime": 0.0,
             "pg_hash_size": 0,
+            "pg_hash_hash": "",  # 文件内容哈希
             "total_count": 0,
             "last_full_rebuild": 0.0,
             "skip_count": 0,  # 跳过刷新的次数
@@ -608,136 +613,162 @@ class KGCacheModule:
                 return
             self.loading = True
 
+        try:
+            logger.info("[KGCache] (sync) 开始后台预热加载知识库图谱缓存...")
+            t0 = time.time()
+
+            # 尝试获取 KGManager 路径
+            from src.chat.knowledge.kg_manager import KGManager
+
+            kg_manager = KGManager()
+            graph_data_path = kg_manager.graph_data_path
+            ent_cnt_data_path = kg_manager.ent_cnt_data_path
+            pg_hash_file_path = kg_manager.pg_hash_file_path
+
+            # 安全验证：确保路径在预期目录内（防止路径遍历攻击）
             try:
-                logger.info("[KGCache] (sync) 开始后台预热加载知识库图谱缓存...")
-                t0 = time.time()
-
-                # 尝试获取 KGManager 路径
-                from src.chat.knowledge.kg_manager import KGManager
-
-                kg_manager = KGManager()
-                graph_data_path = kg_manager.graph_data_path
-                ent_cnt_data_path = kg_manager.ent_cnt_data_path
-                pg_hash_file_path = kg_manager.pg_hash_file_path
-
-                # 安全验证：确保路径在预期目录内（防止路径遍历攻击）
-                try:
-                    # 获取知识库数据目录作为基准目录
-                    kg_data_dir = Path(graph_data_path).parent
-                    validate_file_path(graph_data_path, kg_data_dir)
-                    validate_file_path(ent_cnt_data_path, kg_data_dir)
-                    validate_file_path(pg_hash_file_path, kg_data_dir)
-                except (PathTraversalError, ValueError) as e:
-                    logger.error(f"[KGCache] (sync) 路径安全验证失败: {e}")
-                    return
-
-                if not os.path.exists(graph_data_path):
-                    logger.warning(f"[KGCache] (sync) 知识库图谱文件不存在: {graph_data_path}")
-                    return
-
-                if di_graph is None:
-                    raise ImportError("quick-algo not available")
-
-                graph_b = di_graph.load_from_file(graph_data_path)
-                nodes_b = graph_b.get_node_list()
-                edges_b = graph_b.get_edge_list()
-
-                # 加载实体计数（优先 parquet；缺失依赖时回退到“从图重建”）
-                ent_appear_cnt_b: Dict[str, float] = {}
-                parquet_loaded = False
-                if self.PARQUET_READER_AVAILABLE and pd is not None and os.path.exists(ent_cnt_data_path):
-                    try:
-                        ent_cnt_df = pd.read_parquet(ent_cnt_data_path, engine="pyarrow")
-                        ent_appear_cnt_b = dict({
-                            row["hash_key"]: row["appear_cnt"]
-                            for _, row in ent_cnt_df.iterrows()
-                        })
-                        parquet_loaded = True
-                    except Exception as e:
-                        logger.warning(
-                            "[KGCache] (sync) 读取 parquet 实体计数失败，将回退到从图重建。原因: %s",
-                            e,
-                        )
-
-                if (not parquet_loaded) and (graph_b is not None):
-                    try:
-                        ent_appear_cnt_rebuilt: Dict[str, float] = {}
-                        for edge_tuple in edges_b:
-                            src, tgt = edge_tuple[0], edge_tuple[1]
-                            if isinstance(src, str) and isinstance(tgt, str):
-                                if src.startswith("entity") and tgt.startswith("paragraph"):
-                                    try:
-                                        edge_data = graph_b[src, tgt]
-                                    except Exception:
-                                        edge_data = {}
-                                    weight = edge_data.get("weight", 1.0) if isinstance(edge_data, dict) else 1.0
-                                    ent_appear_cnt_rebuilt[src] = ent_appear_cnt_rebuilt.get(src, 0.0) + float(weight)
-
-                        ent_appear_cnt_b = ent_appear_cnt_rebuilt
-                    except Exception as e:
-                        logger.warning(f"[KGCache] (sync) 从图结构重建实体计数失败，将使用空 ent_appear_cnt。原因: {e}")
-                        ent_appear_cnt_b = {}
-
-                # 加载段落 hash（带 JSON Schema 验证）
                 kg_data_dir = Path(graph_data_path).parent
-                data, error = safe_load_json_file(
-                    pg_hash_file_path,
-                    kg_data_dir,
-                    schema=PARAGRAPH_HASH_SCHEMA,
-                )
-                if data is not None:
-                    stored_paragraph_hashes_b = set(data.get("stored_paragraph_hashes", []))
-                elif error and "不存在" in str(error):
-                    logger.warning(f"[KGCache] (sync) 段落 hash 文件不存在: {pg_hash_file_path}")
-                    stored_paragraph_hashes_b = set()
-                else:
-                    logger.warning(f"[KGCache] (sync) 加载段落 hash 失败: {error}")
-                    stored_paragraph_hashes_b = set()
+                validate_file_path(graph_data_path, kg_data_dir)
+                validate_file_path(ent_cnt_data_path, kg_data_dir)
+                validate_file_path(pg_hash_file_path, kg_data_dir)
+            except (PathTraversalError, ValueError) as e:
+                logger.error(f"[KGCache] (sync) 路径安全验证失败: {e}")
+                return
 
+            if not os.path.exists(graph_data_path):
+                logger.warning(f"[KGCache] (sync) 知识库图谱文件不存在: {graph_data_path}")
+                return
+
+            if di_graph is None:
+                raise ImportError("quick-algo not available")
+
+            graph_b = di_graph.load_from_file(graph_data_path)
+            nodes_b = graph_b.get_node_list()
+            edges_b = graph_b.get_edge_list()
+
+            # 加载实体计数（优先 parquet；缺失依赖时回退到"从图重建"）
+            # P1 修复：添加超时机制，防止 Parquet 加载卡死
+            ent_appear_cnt_b: Dict[str, float] = {}
+            parquet_loaded = False
+            PARQUET_LOAD_TIMEOUT_SECONDS = 60  # 超时阈值
+
+            if self.PARQUET_READER_AVAILABLE and pd is not None and os.path.exists(ent_cnt_data_path):
+                try:
+                    # 使用 ThreadPoolExecutor 实现超时保护
+                    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+
+                    def _load_parquet_sync():
+                        """在独立线程中加载 Parquet 文件"""
+                        df = pd.read_parquet(ent_cnt_data_path, engine="pyarrow")
+                        return dict({
+                            row["hash_key"]: row["appear_cnt"]
+                            for _, row in df.iterrows()
+                        })
+
+                    with ThreadPoolExecutor(max_workers=1) as executor:
+                        future = executor.submit(_load_parquet_sync)
+                        try:
+                            ent_appear_cnt_b = future.result(timeout=PARQUET_LOAD_TIMEOUT_SECONDS)
+                            parquet_loaded = True
+                            logger.debug(f"[KGCache] (sync) Parquet 加载成功，耗时 {time.time() - t0:.2f}s")
+                        except FuturesTimeoutError:
+                            logger.warning(
+                                f"[KGCache] (sync) Parquet 加载超时（>{PARQUET_LOAD_TIMEOUT_SECONDS}s），"
+                                "跳过 ent_appear_cnt 加载，将从图重建"
+                            )
+                            # 取消未完成的任务
+                            future.cancel()
+                except Exception as e:
+                    logger.warning(
+                        "[KGCache] (sync) 读取 parquet 实体计数失败，将回退到从图重建。原因: %s",
+                        e,
+                    )
+
+            if (not parquet_loaded) and (graph_b is not None):
+                try:
+                    ent_appear_cnt_rebuilt: Dict[str, float] = {}
+                    for idx, edge_tuple in enumerate(edges_b, start=1):
+                        src, tgt = edge_tuple[0], edge_tuple[1]
+                        if isinstance(src, str) and isinstance(tgt, str):
+                            if src.startswith("entity") and tgt.startswith("paragraph"):
+                                try:
+                                    edge_data = graph_b[src, tgt]
+                                except Exception:
+                                    edge_data = {}
+                                weight = edge_data.get("weight", 1.0) if isinstance(edge_data, dict) else 1.0
+                                ent_appear_cnt_rebuilt[src] = ent_appear_cnt_rebuilt.get(src, 0.0) + float(weight)
+
+                        if idx % self._yield_batch_size == 0:
+                            time.sleep(0)
+
+                    ent_appear_cnt_b = ent_appear_cnt_rebuilt
+                except Exception as e:
+                    logger.warning(f"[KGCache] (sync) 从图结构重建实体计数失败，将使用空 ent_appear_cnt。原因: {e}")
+                    ent_appear_cnt_b = {}
+
+            # 加载段落 hash（带 JSON Schema 验证）
+            kg_data_dir = Path(graph_data_path).parent
+            data, error = safe_load_json_file(
+                pg_hash_file_path,
+                kg_data_dir,
+                schema=PARAGRAPH_HASH_SCHEMA,
+            )
+            if data is not None:
+                stored_paragraph_hashes_b = set(data.get("stored_paragraph_hashes", []))
+            elif error and "不存在" in str(error):
+                logger.warning(f"[KGCache] (sync) 段落 hash 文件不存在: {pg_hash_file_path}")
+                stored_paragraph_hashes_b = set()
+            else:
+                logger.warning(f"[KGCache] (sync) 加载段落 hash 失败: {error}")
+                stored_paragraph_hashes_b = set()
+
+            if self._stopped:
+                return
+
+            # 分批延迟：避免 CPU 峰值
+            total_items = len(nodes_b) + len(edges_b) + len(ent_appear_cnt_b)
+            batches = max(1, (total_items + self.batch_size - 1) // self.batch_size)
+            for i in range(min(batches, 100)):
+                time.sleep(self.batch_delay)
+                if i % self._yield_batch_size == 0:
+                    time.sleep(0)
                 if self._stopped:
                     return
 
-                # 分批延迟：避免 CPU 峰值
-                total_items = len(nodes_b) + len(edges_b) + len(ent_appear_cnt_b)
-                batches = max(1, (total_items + self.batch_size - 1) // self.batch_size)
-                for _ in range(min(batches, 100)):
-                    time.sleep(self.batch_delay)
-                    if self._stopped:
-                        return
+            # 原子切换（锁内仅指针赋值/swap）
+            with self.buffer_lock:
+                self.buffer_a = True
+                self.graph_a = graph_b
+                self.nodes_a = nodes_b
+                self.edges_a = edges_b
+                self.ent_appear_cnt_a = ent_appear_cnt_b
+                self.stored_paragraph_hashes_a = stored_paragraph_hashes_b
 
-                # 原子切换
-                with self.buffer_lock:
-                    self.buffer_b = True
-                    self.graph_b = graph_b
-                    self.nodes_b = nodes_b
-                    self.edges_b = edges_b
-                    self.ent_appear_cnt_b = ent_appear_cnt_b
-                    self.stored_paragraph_hashes_b = stored_paragraph_hashes_b
+                self.buffer_b = None
+                self.graph_b = None
+                self.nodes_b = None
+                self.edges_b = None
+                self.ent_appear_cnt_b = None
+                self.stored_paragraph_hashes_b = None
 
-                    self.buffer_a, self.buffer_b = self.buffer_b, None
-                    self.graph_a, self.graph_b = self.graph_b, None
-                    self.nodes_a, self.nodes_b = self.nodes_b, None
-                    self.edges_a, self.edges_b = self.edges_b, None
-                    self.ent_appear_cnt_a, self.ent_appear_cnt_b = self.ent_appear_cnt_b, None
-                    self.stored_paragraph_hashes_a, self.stored_paragraph_hashes_b = self.stored_paragraph_hashes_b, None
+            # 更新文件变更追踪器
+            total_count = len(nodes_b) + len(edges_b) + len(ent_appear_cnt_b)
+            self._update_tracker(graph_data_path, ent_cnt_data_path, pg_hash_file_path, total_count)
 
-                # 更新文件变更追踪器
-                total_count = len(nodes_b) + len(edges_b) + len(ent_appear_cnt_b)
-                self._update_tracker(graph_data_path, ent_cnt_data_path, pg_hash_file_path, total_count)
+            self.last_refresh = time.time()
+            load_time = time.time() - t0
+            logger.info(
+                f"[KGCache] (sync) 缓存预热完成并切换: 节点 {len(nodes_b)} 个, 边 {len(edges_b)} 条, 耗时 {load_time:.2f}s"
+            )
 
-                self.last_refresh = time.time()
-                load_time = time.time() - t0
-                logger.info(
-                    f"[KGCache] (sync) 缓存预热完成并切换: 节点 {len(nodes_b)} 个, 边 {len(edges_b)} 条, 耗时 {load_time:.2f}s"
-                )
+            # 预热完成后尝试注入已存在的 qa_manager.kg_manager
+            try:
+                self.try_inject_into_runtime()
+            except Exception:
+                pass
 
-                # 预热完成后尝试注入已存在的 qa_manager.kg_manager
-                try:
-                    self.try_inject_into_runtime()
-                except Exception:
-                    pass
-
-            finally:
+        finally:
+            with self._sync_load_lock:
                 self.loading = False
 
     def try_inject_into_runtime(self) -> bool:
@@ -818,30 +849,64 @@ class KGCacheModule:
         """
         return self._degraded_mode
 
-    def _get_file_stats(self, file_path: str) -> Dict[str, Any]:
-        """获取文件状态信息（mtime 和 size）。
+    def _get_file_stats(self, file_path: str, compute_hash: bool = False) -> Dict[str, Any]:
+        """获取文件状态信息（mtime、size 和可选的 hash）。
 
         Args:
             file_path: 文件路径
+            compute_hash: 是否计算文件内容哈希（用于精确变更检测）
 
         Returns:
-            包含 mtime 和 size 的字典，文件不存在时返回空值
+            包含 mtime、size 和可选 hash 的字典，文件不存在时返回空值
         """
         try:
             if os.path.exists(file_path):
                 stat_info = os.stat(file_path)
-                return {
+                result = {
                     "mtime": stat_info.st_mtime,
                     "size": stat_info.st_size,
                 }
+                # 仅在请求时计算哈希（避免大文件频繁计算）
+                if compute_hash:
+                    result["hash"] = self._compute_file_hash(file_path)
+                return result
         except OSError as e:
             logger.debug(f"[KGCache] 获取文件状态失败 {file_path}: {e}")
-        return {"mtime": 0.0, "size": 0}
+        return {"mtime": 0.0, "size": 0, "hash": ""}
+
+    def _compute_file_hash(self, file_path: str, chunk_size: int = 8192) -> str:
+        """计算文件内容的 MD5 哈希值。
+
+        使用分块读取避免大文件内存占用过高。
+
+        Args:
+            file_path: 文件路径
+            chunk_size: 分块大小（字节）
+
+        Returns:
+            文件内容的 MD5 哈希值（十六进制字符串）
+        """
+        import hashlib
+        try:
+            hasher = hashlib.md5()
+            with open(file_path, "rb") as f:
+                while True:
+                    chunk = f.read(chunk_size)
+                    if not chunk:
+                        break
+                    hasher.update(chunk)
+            return hasher.hexdigest()
+        except Exception as e:
+            logger.debug(f"[KGCache] 计算文件哈希失败 {file_path}: {e}")
+            return ""
 
     def _check_file_changes(self, graph_path: str, ent_cnt_path: str, pg_hash_path: str) -> Dict[str, bool]:
         """检测文件变更。
 
-        通过比较文件的 mtime 和 size 来判断是否有变更。
+        检测策略：
+        1. 快速检测：比较文件的 mtime 和 size
+        2. 精确检测：当 mtime/size 变化时，计算文件哈希进行确认
+           这可以避免"内容未变但 mtime 变化"的误判（如 touch 命令）
 
         Args:
             graph_path: 图谱文件路径
@@ -861,23 +926,44 @@ class KGCacheModule:
         # 检查图谱文件
         graph_stats = self._get_file_stats(graph_path)
         if graph_stats["mtime"] > 0:
+            # 快速检测：mtime 或 size 变化
             if (graph_stats["mtime"] != self._tracker["graph_mtime"] or
                 graph_stats["size"] != self._tracker["graph_size"]):
-                changes["graph_changed"] = True
+                # 精确检测：计算哈希确认是否真正变化
+                if self._tracker.get("graph_hash"):
+                    current_hash = self._compute_file_hash(graph_path)
+                    if current_hash and current_hash != self._tracker["graph_hash"]:
+                        changes["graph_changed"] = True
+                    # else: mtime/size 变化但内容未变，不触发刷新
+                else:
+                    # 首次加载或无历史哈希，直接标记变更
+                    changes["graph_changed"] = True
 
         # 检查实体计数文件
         ent_cnt_stats = self._get_file_stats(ent_cnt_path)
         if ent_cnt_stats["mtime"] > 0:
             if (ent_cnt_stats["mtime"] != self._tracker["ent_cnt_mtime"] or
                 ent_cnt_stats["size"] != self._tracker["ent_cnt_size"]):
-                changes["ent_cnt_changed"] = True
+                # 精确检测：计算哈希确认
+                if self._tracker.get("ent_cnt_hash"):
+                    current_hash = self._compute_file_hash(ent_cnt_path)
+                    if current_hash and current_hash != self._tracker["ent_cnt_hash"]:
+                        changes["ent_cnt_changed"] = True
+                else:
+                    changes["ent_cnt_changed"] = True
 
         # 检查段落 hash 文件
         pg_hash_stats = self._get_file_stats(pg_hash_path)
         if pg_hash_stats["mtime"] > 0:
             if (pg_hash_stats["mtime"] != self._tracker["pg_hash_mtime"] or
                 pg_hash_stats["size"] != self._tracker["pg_hash_size"]):
-                changes["pg_hash_changed"] = True
+                # 精确检测：计算哈希确认
+                if self._tracker.get("pg_hash_hash"):
+                    current_hash = self._compute_file_hash(pg_hash_path)
+                    if current_hash and current_hash != self._tracker["pg_hash_hash"]:
+                        changes["pg_hash_changed"] = True
+                else:
+                    changes["pg_hash_changed"] = True
 
         # 汇总是否有任何变更
         changes["any_changed"] = any([
@@ -891,6 +977,8 @@ class KGCacheModule:
     def _update_tracker(self, graph_path: str, ent_cnt_path: str, pg_hash_path: str, total_count: int) -> None:
         """更新文件变更追踪器。
 
+        同时保存 mtime/size 和文件哈希，用于后续变更检测。
+
         Args:
             graph_path: 图谱文件路径
             ent_cnt_path: 实体计数文件路径
@@ -901,12 +989,22 @@ class KGCacheModule:
         ent_cnt_stats = self._get_file_stats(ent_cnt_path)
         pg_hash_stats = self._get_file_stats(pg_hash_path)
 
+        # 更新 mtime 和 size
         self._tracker["graph_mtime"] = graph_stats["mtime"]
         self._tracker["graph_size"] = graph_stats["size"]
         self._tracker["ent_cnt_mtime"] = ent_cnt_stats["mtime"]
         self._tracker["ent_cnt_size"] = ent_cnt_stats["size"]
         self._tracker["pg_hash_mtime"] = pg_hash_stats["mtime"]
         self._tracker["pg_hash_size"] = pg_hash_stats["size"]
+
+        # 更新文件哈希（用于精确变更检测）
+        if graph_stats["mtime"] > 0:
+            self._tracker["graph_hash"] = self._compute_file_hash(graph_path)
+        if ent_cnt_stats["mtime"] > 0:
+            self._tracker["ent_cnt_hash"] = self._compute_file_hash(ent_cnt_path)
+        if pg_hash_stats["mtime"] > 0:
+            self._tracker["pg_hash_hash"] = self._compute_file_hash(pg_hash_path)
+
         self._tracker["total_count"] = total_count
         self._tracker["last_full_rebuild"] = time.time()
         self._tracker["file_path"] = graph_path
@@ -1020,10 +1118,14 @@ class KGCacheModule:
                     ent_cnt_df = await asyncio.to_thread(
                         pd.read_parquet, ent_cnt_data_path, engine="pyarrow"
                     )
-                    ent_appear_cnt_b = dict({
-                        row["hash_key"]: row["appear_cnt"]
-                        for _, row in ent_cnt_df.iterrows()
-                    })
+
+                    def _build_ent_cnt(df):
+                        return {
+                            row["hash_key"]: row["appear_cnt"]
+                            for _, row in df.iterrows()
+                        }
+
+                    ent_appear_cnt_b = await asyncio.to_thread(_build_ent_cnt, ent_cnt_df)
                     parquet_loaded = True
                     logger.debug(
                         "[KGCache] 已从 parquet 加载实体计数: %d 个实体",
@@ -1040,7 +1142,7 @@ class KGCacheModule:
                 # 从图结构重建 ent_appear_cnt（参考 KGManager._rebuild_metadata_from_graph 逻辑）
                 try:
                     ent_appear_cnt_rebuilt: Dict[str, float] = {}
-                    for edge_tuple in edges_b:
+                    for idx, edge_tuple in enumerate(edges_b, start=1):
                         src, tgt = edge_tuple[0], edge_tuple[1]
                         if isinstance(src, str) and isinstance(tgt, str):
                             if src.startswith("entity") and tgt.startswith("paragraph"):
@@ -1050,6 +1152,9 @@ class KGCacheModule:
                                     edge_data = {}
                                 weight = edge_data.get("weight", 1.0) if isinstance(edge_data, dict) else 1.0
                                 ent_appear_cnt_rebuilt[src] = ent_appear_cnt_rebuilt.get(src, 0.0) + float(weight)
+
+                        if idx % self._yield_batch_size == 0:
+                            await asyncio.sleep(0)
 
                     ent_appear_cnt_b = ent_appear_cnt_rebuilt
                     logger.debug(
@@ -1108,6 +1213,8 @@ class KGCacheModule:
             batches = max(1, (total_items + self.batch_size - 1) // self.batch_size)
             for i in range(min(batches, 100)):  # 最多延迟 100 批
                 await asyncio.sleep(self.batch_delay)
+                if i % self._yield_batch_size == 0:
+                    await asyncio.sleep(0)
                 if self._stopped:
                     return
             
@@ -1345,7 +1452,10 @@ _KG_CACHE_SINGLETON: Optional[KGCacheModule] = None
 _KG_CACHE_SINGLETON_LOCK = threading.Lock()
 
 
-def apply_kg_cache(cache_manager) -> Optional[KGCacheModule]:
+def apply_kg_cache(
+    cache_manager,
+    config: Optional[Dict[str, Any]] = None,
+) -> Optional[KGCacheModule]:
     """应用知识库图谱缓存补丁（幂等）。
 
     额外处理：
@@ -1356,10 +1466,30 @@ def apply_kg_cache(cache_manager) -> Optional[KGCacheModule]:
     global _KG_CACHE_SINGLETON
 
     try:
+        cfg = config or {}
+        exp_cfg = ExpirationConfig(
+            incremental_refresh_interval=float(cfg.get("incremental_refresh_interval", 600.0)),
+            full_rebuild_interval=float(cfg.get("full_rebuild_interval", 86400.0)),
+            incremental_threshold_ratio=float(cfg.get("incremental_threshold_ratio", 0.1)),
+            deletion_check_interval=int(cfg.get("deletion_check_interval", 10)),
+        )
+
         with _KG_CACHE_SINGLETON_LOCK:
             if _KG_CACHE_SINGLETON is None:
-                _KG_CACHE_SINGLETON = KGCacheModule()
+                _KG_CACHE_SINGLETON = KGCacheModule(
+                    batch_size=int(cfg.get("batch_size", 100)),
+                    batch_delay=float(cfg.get("batch_delay", 0.05)),
+                    refresh_interval=int(cfg.get("refresh_interval", 3600)),
+                    expiration_config=exp_cfg,
+                )
             cache = _KG_CACHE_SINGLETON
+
+            # 热更新场景：单例已存在时同步最新配置
+            cache.batch_size = max(1, int(cfg.get("batch_size", cache.batch_size)))
+            cache.batch_delay = max(0.001, float(cfg.get("batch_delay", cache.batch_delay)))
+            cache.refresh_interval = max(60, int(cfg.get("refresh_interval", cache.refresh_interval)))
+            cache._yield_batch_size = max(200, cache.batch_size * 10)
+            cache._expiration_manager.config = exp_cfg
 
         # 注册到缓存管理器（重复注册不影响：直接覆盖同名 key）
         try:

@@ -382,9 +382,9 @@ class _PerformanceOptimizer:
         try:
             from .core import (
                 NotificationConfig,
+                get_notification_manager,
                 init_notification_manager,
             )
-            from .core.direct_notification import DirectNotificationSender
 
             # 读取通知配置（简化版）
             notification_enabled = True
@@ -415,27 +415,13 @@ class _PerformanceOptimizer:
                 memory_critical_enabled=True,
             )
 
-            # 初始化直连发送器（QQ 模式首选）
-            direct_sender = DirectNotificationSender(
-                admin_qq=str(admin_qq).strip(),
-                enabled=notification_enabled,
-                cooldown_seconds=int(notification_config.qq_cooldown_seconds),
-                platform="qq",
-            )
-
             # 初始化通知管理器
-            self._notification_manager = init_notification_manager(
-                notification_config,
-                direct_sender=direct_sender,
-            )
+            self._notification_manager = init_notification_manager(notification_config)
 
-            # 将通知管理器绑定到内存监控（否则阈值触发时不会发通知）
-            if self._memory_monitor:
-                self._memory_monitor.set_notification_manager(self._notification_manager)
+            # 尝试设置 Bot 实例
+            self._try_set_bot_instance()
 
-            # QQ 渠道回退路径仍依赖 bot 实例，增加重试注入提高健壮性
             if qq_target > 0:
-                self._try_set_bot_instance(retries=5, retry_delay=1.0)
                 self.logger.info(f"[PerfOpt] ✓ 通知系统初始化完成，QQ: {qq_target}")
             else:
                 self.logger.info("[PerfOpt] ✓ 通知系统初始化完成（仅控制台模式）")
@@ -443,60 +429,35 @@ class _PerformanceOptimizer:
         except Exception as e:
             self.logger.warning(f"[PerfOpt] 通知系统初始化失败: {e}")
 
-    def _resolve_bot_instance(self) -> Optional[Any]:
-        """尝试从可用来源解析 Bot 实例。"""
-        bot_instance = None
+    def _try_set_bot_instance(self):
+        """尝试设置 Bot 实例到通知管理器"""
+        if not self._notification_manager:
+            return
 
-        # 方式1: 从全局ChatBot实例获取
         try:
-            from src.chat.message_receive.bot import chat_bot
+            # 尝试从不同来源获取 Bot 实例
+            bot_instance = None
 
-            bot_instance = getattr(chat_bot, "bot", None)
-        except ImportError:
-            pass
-
-        # 方式2: 从插件实例获取
-        if bot_instance is None and self.plugin_instance:
+            # 方式1: 从全局变量获取
             try:
-                bot_instance = getattr(self.plugin_instance, "_bot", None)
-            except Exception:
+                from src.core.bot import bot
+                bot_instance = bot
+            except ImportError:
                 pass
 
-        return bot_instance
+            # 方式2: 从插件实例获取
+            if bot_instance is None and self.plugin_instance:
+                try:
+                    bot_instance = getattr(self.plugin_instance, "_bot", None)
+                except Exception:
+                    pass
 
-    def _try_set_bot_instance(self, retries: int = 1, retry_delay: float = 1.0) -> bool:
-        """尝试设置 Bot 实例到通知管理器（支持重试）。"""
-        if not self._notification_manager:
-            return False
-
-        try:
-            bot_instance = self._resolve_bot_instance()
             if bot_instance:
                 self._notification_manager.set_bot_instance(bot_instance)
                 self.logger.info("[PerfOpt] ✓ Bot 实例已设置到通知管理器")
-                return True
+
         except Exception as e:
-            self.logger.debug(f"[PerfOpt] 设置 Bot 实例失败（可重试）: {e}")
-
-        remaining = max(0, int(retries) - 1)
-        if remaining > 0:
-            delay = max(0.1, float(retry_delay))
-            self.logger.debug(
-                "[PerfOpt] Bot 实例暂不可用，将在 %.1fs 后重试（剩余 %d 次）",
-                delay,
-                remaining,
-            )
-            timer = threading.Timer(
-                delay,
-                lambda: self._try_set_bot_instance(
-                    retries=remaining,
-                    retry_delay=delay,
-                ),
-            )
-            timer.daemon = True
-            timer.start()
-
-        return False
+            self.logger.debug(f"[PerfOpt] 设置 Bot 实例失败（稍后重试）: {e}")
 
     def _reload_notification_config(self):
         """重载通知系统配置（简化版）"""
@@ -505,7 +466,6 @@ class _PerformanceOptimizer:
 
         try:
             from .core import NotificationConfig
-            from .core.direct_notification import DirectNotificationSender
 
             # 读取简化配置
             notification_enabled = self._config_manager.get("notification.enabled", True)
@@ -533,25 +493,6 @@ class _PerformanceOptimizer:
             )
 
             self._notification_manager.set_config(notification_config)
-
-            # 同步直连发送器配置
-            direct_sender = DirectNotificationSender(
-                admin_qq=str(admin_qq).strip(),
-                enabled=notification_enabled,
-                cooldown_seconds=int(notification_config.qq_cooldown_seconds),
-                platform="qq",
-            )
-            if hasattr(self._notification_manager, "set_direct_sender"):
-                self._notification_manager.set_direct_sender(direct_sender)
-
-            # 防御性重绑：确保内存监控使用当前通知管理器实例
-            if self._memory_monitor:
-                self._memory_monitor.set_notification_manager(self._notification_manager)
-
-            # QQ 渠道回退路径在配置更新后也需重试注入 bot 实例
-            if qq_target > 0:
-                self._try_set_bot_instance(retries=3, retry_delay=1.0)
-
             self.logger.info("[PerfOpt] ✓ 通知系统配置已重载")
 
         except Exception as e:
@@ -656,63 +597,6 @@ class _PerformanceOptimizer:
             user_ref_batch_max_size = 2000
             user_ref_batch_ttl = 600
             user_ref_batch_max_concurrency = 2
-            jargon_matcher_max_automatons = 100
-            image_desc_bulk_lookup_max_batch_size = 100
-
-            # 缓存模块配置注入参数
-            expression_cache_batch_size = 100
-            expression_cache_batch_delay = 0.05
-            expression_cache_refresh_interval = 3600
-            expression_cache_incremental_refresh_interval = 600
-            expression_cache_incremental_threshold_ratio = 0.1
-            expression_cache_full_rebuild_interval = 86400
-            expression_cache_deletion_check_interval = 10
-            expression_cache_max_items = 10000
-            expression_cache_max_memory_mb = 200
-
-            jargon_cache_batch_size = 100
-            jargon_cache_batch_delay = 0.05
-            jargon_cache_refresh_interval = 3600
-            jargon_cache_enable_content_index = True
-            jargon_cache_incremental_refresh_interval = 600
-            jargon_cache_incremental_threshold_ratio = 0.1
-            jargon_cache_full_rebuild_interval = 86400
-            jargon_cache_deletion_check_interval = 10
-
-            kg_cache_batch_size = 100
-            kg_cache_batch_delay = 0.05
-            kg_cache_refresh_interval = 3600
-            kg_cache_incremental_refresh_interval = 600
-            kg_cache_incremental_threshold_ratio = 0.1
-            kg_cache_full_rebuild_interval = 86400
-            kg_cache_deletion_check_interval = 10
-
-            expression_cache_batch_size = 100
-            expression_cache_batch_delay = 0.05
-            expression_cache_refresh_interval = 3600
-            expression_cache_incremental_refresh_interval = 600
-            expression_cache_incremental_threshold_ratio = 0.1
-            expression_cache_full_rebuild_interval = 86400
-            expression_cache_deletion_check_interval = 10
-            expression_cache_max_items = 10000
-            expression_cache_max_memory_mb = 200
-
-            jargon_cache_batch_size = 100
-            jargon_cache_batch_delay = 0.05
-            jargon_cache_refresh_interval = 3600
-            jargon_cache_enable_content_index = True
-            jargon_cache_incremental_refresh_interval = 600
-            jargon_cache_incremental_threshold_ratio = 0.1
-            jargon_cache_full_rebuild_interval = 86400
-            jargon_cache_deletion_check_interval = 10
-
-            kg_cache_batch_size = 100
-            kg_cache_batch_delay = 0.05
-            kg_cache_refresh_interval = 3600
-            kg_cache_incremental_refresh_interval = 600
-            kg_cache_incremental_threshold_ratio = 0.1
-            kg_cache_full_rebuild_interval = 86400
-            kg_cache_deletion_check_interval = 10
 
             if self._config_manager:
                 enable_lightweight_profiler = self._config_manager.get(
@@ -781,87 +665,6 @@ class _PerformanceOptimizer:
                 )
                 user_ref_batch_max_concurrency = int(
                     self._config_manager.get("modules.user_reference_batch_resolve_max_concurrency", 2)
-                )
-                jargon_matcher_max_automatons = int(
-                    self._config_manager.get("modules.jargon_matcher_automaton_max_automatons", 100)
-                )
-                image_desc_bulk_lookup_max_batch_size = int(
-                    self._config_manager.get("modules.image_desc_bulk_lookup_max_batch_size", 100)
-                )
-
-                expression_cache_batch_size = int(
-                    self._config_manager.get("expression_cache.batch_size", 100)
-                )
-                expression_cache_batch_delay = float(
-                    self._config_manager.get("expression_cache.batch_delay", 0.05)
-                )
-                expression_cache_refresh_interval = int(
-                    self._config_manager.get("expression_cache.refresh_interval", 3600)
-                )
-                expression_cache_incremental_refresh_interval = int(
-                    self._config_manager.get("expression_cache.incremental_refresh_interval", 600)
-                )
-                expression_cache_incremental_threshold_ratio = float(
-                    self._config_manager.get("expression_cache.incremental_threshold_ratio", 0.1)
-                )
-                expression_cache_full_rebuild_interval = int(
-                    self._config_manager.get("expression_cache.full_rebuild_interval", 86400)
-                )
-                expression_cache_deletion_check_interval = int(
-                    self._config_manager.get("expression_cache.deletion_check_interval", 10)
-                )
-                expression_cache_max_items = int(
-                    self._config_manager.get("expression_cache.max_items", 10000)
-                )
-                expression_cache_max_memory_mb = int(
-                    self._config_manager.get("expression_cache.max_memory_mb", 200)
-                )
-
-                jargon_cache_batch_size = int(
-                    self._config_manager.get("jargon_cache.batch_size", 100)
-                )
-                jargon_cache_batch_delay = float(
-                    self._config_manager.get("jargon_cache.batch_delay", 0.05)
-                )
-                jargon_cache_refresh_interval = int(
-                    self._config_manager.get("jargon_cache.refresh_interval", 3600)
-                )
-                jargon_cache_enable_content_index = bool(
-                    self._config_manager.get("jargon_cache.enable_content_index", True)
-                )
-                jargon_cache_incremental_refresh_interval = int(
-                    self._config_manager.get("jargon_cache.incremental_refresh_interval", 600)
-                )
-                jargon_cache_incremental_threshold_ratio = float(
-                    self._config_manager.get("jargon_cache.incremental_threshold_ratio", 0.1)
-                )
-                jargon_cache_full_rebuild_interval = int(
-                    self._config_manager.get("jargon_cache.full_rebuild_interval", 86400)
-                )
-                jargon_cache_deletion_check_interval = int(
-                    self._config_manager.get("jargon_cache.deletion_check_interval", 10)
-                )
-
-                kg_cache_batch_size = int(
-                    self._config_manager.get("kg_cache.batch_size", 100)
-                )
-                kg_cache_batch_delay = float(
-                    self._config_manager.get("kg_cache.batch_delay", 0.05)
-                )
-                kg_cache_refresh_interval = int(
-                    self._config_manager.get("kg_cache.refresh_interval", 3600)
-                )
-                kg_cache_incremental_refresh_interval = int(
-                    self._config_manager.get("kg_cache.incremental_refresh_interval", 600)
-                )
-                kg_cache_incremental_threshold_ratio = float(
-                    self._config_manager.get("kg_cache.incremental_threshold_ratio", 0.1)
-                )
-                kg_cache_full_rebuild_interval = int(
-                    self._config_manager.get("kg_cache.full_rebuild_interval", 86400)
-                )
-                kg_cache_deletion_check_interval = int(
-                    self._config_manager.get("kg_cache.deletion_check_interval", 10)
                 )
 
             # 动态加载并应用各个缓存模块
@@ -1093,20 +896,7 @@ class _PerformanceOptimizer:
                         expression_cache_module, "apply_expression_cache", None
                     )
                     if apply_expression_cache:
-                        apply_expression_cache(
-                            self.cache_manager,
-                            {
-                                "batch_size": expression_cache_batch_size,
-                                "batch_delay": expression_cache_batch_delay,
-                                "refresh_interval": expression_cache_refresh_interval,
-                                "incremental_refresh_interval": expression_cache_incremental_refresh_interval,
-                                "incremental_threshold_ratio": expression_cache_incremental_threshold_ratio,
-                                "full_rebuild_interval": expression_cache_full_rebuild_interval,
-                                "deletion_check_interval": expression_cache_deletion_check_interval,
-                                "max_items": expression_cache_max_items,
-                                "max_memory_mb": expression_cache_max_memory_mb,
-                            },
-                        )
+                        apply_expression_cache(self.cache_manager)
                         self.logger.info("[PerfOpt] ✓ 表达式缓存补丁已应用")
                 except Exception as e:
                     self.logger.error(f"[PerfOpt] 表达式缓存补丁失败: {e}")
@@ -1123,19 +913,7 @@ class _PerformanceOptimizer:
                         jargon_cache_module, "apply_jargon_cache", None
                     )
                     if apply_jargon_cache:
-                        apply_jargon_cache(
-                            self.cache_manager,
-                            {
-                                "batch_size": jargon_cache_batch_size,
-                                "batch_delay": jargon_cache_batch_delay,
-                                "refresh_interval": jargon_cache_refresh_interval,
-                                "enable_content_index": jargon_cache_enable_content_index,
-                                "incremental_refresh_interval": jargon_cache_incremental_refresh_interval,
-                                "incremental_threshold_ratio": jargon_cache_incremental_threshold_ratio,
-                                "full_rebuild_interval": jargon_cache_full_rebuild_interval,
-                                "deletion_check_interval": jargon_cache_deletion_check_interval,
-                            },
-                        )
+                        apply_jargon_cache(self.cache_manager)
                         self.logger.info("[PerfOpt] ✓ 黑话缓存补丁已应用")
                 except Exception as e:
                     self.logger.error(f"[PerfOpt] 黑话缓存补丁失败: {e}")
@@ -1157,7 +935,6 @@ class _PerformanceOptimizer:
                             self.cache_manager,
                             {
                                 "messages_stream_scan_enabled": jargon_matcher_messages_stream_scan_enabled,
-                                "max_automatons": jargon_matcher_max_automatons,
                             },
                         )
                         self.logger.info(
@@ -1178,18 +955,7 @@ class _PerformanceOptimizer:
                     )
                     apply_kg_cache = getattr(kg_cache_module, "apply_kg_cache", None)
                     if apply_kg_cache:
-                        apply_kg_cache(
-                            self.cache_manager,
-                            {
-                                "batch_size": kg_cache_batch_size,
-                                "batch_delay": kg_cache_batch_delay,
-                                "refresh_interval": kg_cache_refresh_interval,
-                                "incremental_refresh_interval": kg_cache_incremental_refresh_interval,
-                                "incremental_threshold_ratio": kg_cache_incremental_threshold_ratio,
-                                "full_rebuild_interval": kg_cache_full_rebuild_interval,
-                                "deletion_check_interval": kg_cache_deletion_check_interval,
-                            },
-                        )
+                        apply_kg_cache(self.cache_manager)
                         self.logger.info("[PerfOpt] ✓ 知识库图谱缓存补丁已应用")
                 except Exception as e:
                     self.logger.error(f"[PerfOpt] 知识库图谱缓存补丁失败: {e}")
@@ -1225,12 +991,7 @@ class _PerformanceOptimizer:
                         img_desc_module, "apply_image_desc_bulk_lookup", None
                     )
                     if apply_image_desc_bulk_lookup:
-                        apply_image_desc_bulk_lookup(
-                            self.cache_manager,
-                            {
-                                "max_batch_size": image_desc_bulk_lookup_max_batch_size,
-                            },
-                        )
+                        apply_image_desc_bulk_lookup(self.cache_manager)
                         self.logger.info("[PerfOpt] ✓ 图片描述批量替换补丁已应用")
                 except Exception as e:
                     self.logger.error(f"[PerfOpt] 图片描述批量替换补丁失败: {e}")
@@ -1747,11 +1508,6 @@ class CMPerformanceOptimizerPlugin(BasePlugin):
                 default=False,
                 description="黑话匹配消息路径启用分段扫描（避免大文本 join，默认关闭以保持旧行为）",
             ),
-            "jargon_matcher_automaton_max_automatons": ConfigField(
-                type=int,
-                default=100,
-                description="黑话自动机缓存上限（每键自动机条目数，建议 20-1000）",
-            ),
             "kg_cache_enabled": ConfigField(
                 type=bool, default=True, description="是否启用知识图谱缓存"
             ),
@@ -1759,12 +1515,7 @@ class CMPerformanceOptimizerPlugin(BasePlugin):
                 type=bool, default=True, description="是否启用Levenshtein距离加速"
             ),
             "image_desc_bulk_lookup_enabled": ConfigField(
-                type=bool, default=False, description="是否启用图片描述批量替换"
-            ),
-            "image_desc_bulk_lookup_max_batch_size": ConfigField(
-                type=int,
-                default=100,
-                description="图片描述批量查询单批上限（WHERE IN 分批阈值，建议 20-500）",
+                type=bool, default=True, description="是否启用图片描述批量替换"
             ),
             "user_reference_batch_resolve_enabled": ConfigField(
                 type=bool, default=True, description="是否启用用户引用批量解析"
@@ -2244,16 +1995,5 @@ class CMPerformanceOptimizerPlugin(BasePlugin):
             是否设置成功
         """
         if self._opt and self._opt._config_manager:
-            changed = self._opt._config_manager.set(path, value)
-            if not changed:
-                return False
-
-            # 通知配置支持即时生效，其他配置仍遵循“重启后生效”策略
-            if path.startswith("notification.") and self._opt.started:
-                try:
-                    self._opt._reload_notification_config()
-                except Exception as e:
-                    logger.warning(f"[PerfOpt] 通知配置热更新失败: {e}")
-                    return False
-            return True
+            return self._opt._config_manager.set(path, value)
         return False

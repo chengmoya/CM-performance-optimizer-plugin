@@ -40,24 +40,6 @@
       "version": ">=2.0.0",
       "optional": true,
       "description": "黑话匹配自动机模块（jargon_matcher_automaton）可选依赖"
-    },
-    {
-      "package_name": "aiofiles",
-      "version": ">=0.8.0",
-      "optional": true,
-      "description": "异步文件操作（kg_cache 可选加速）"
-    },
-    {
-      "package_name": "orjson",
-      "version": ">=3.8.0",
-      "optional": true,
-      "description": "高性能 JSON 处理（message_cache 可选加速）"
-    },
-    {
-      "package_name": "psutil",
-      "version": ">=5.9.0",
-      "optional": true,
-      "description": "系统资源监控（monitor/lightweight_profiler 可选依赖）"
     }
   ],
   "id": "城陌.CM-performance-optimizer-plugin",

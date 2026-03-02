@@ -191,6 +191,8 @@ class FullMessageCache:
         self.load_lock = asyncio.Lock()
         self.last_refresh = 0
         self.stats = ModuleStats("full_message_cache")
+        # 大循环让出事件循环的批次阈值
+        self._yield_batch_size = max(100, self.batch_size * 5)
 
         # 增量加载状态
         self._incremental_loading: Set[str] = set()
@@ -344,7 +346,7 @@ class FullMessageCache:
 
         return result
 
-    def add_message(self, chat_id: str, message: Any, chat_stream: Any = None) -> bool:
+    async def add_message(self, chat_id: str, message: Any, chat_stream: Any = None) -> bool:
         """添加消息到缓存
 
         Args:
@@ -364,38 +366,67 @@ class FullMessageCache:
             return False
 
         cid = str(chat_id)
+        should_evict = False
+
         with self.buffer_lock:
             if self.buffer_a is None:
                 return False
 
             # 获取或创建chat数据
-            if cid not in self.buffer_a:
-                self.buffer_a[cid] = {"messages": [], "ts": time.time()}
+            is_new_chat = cid not in self.buffer_a
+            if is_new_chat:
+                self.buffer_a[cid] = {"messages": [], "ts": time.time(), "msg_ids": set()}
                 self.buffer_a.move_to_end(cid)
 
             chat_data = self.buffer_a[cid]
             messages = chat_data["messages"]
 
+            # 使用集合加速 message_id 去重
+            msg_ids = chat_data.get("msg_ids")
+            if msg_ids is None:
+                msg_ids = {
+                    getattr(existing_msg, "message_id", None)
+                    for existing_msg in messages
+                    if getattr(existing_msg, "message_id", None) is not None
+                }
+                chat_data["msg_ids"] = msg_ids
+
+            new_msg_id = getattr(db_msg, "message_id", None)
+            if new_msg_id is not None and new_msg_id in msg_ids:
+                # 消息已存在，跳过添加（不是错误，是正常的去重）
+                return False
+
+            removed_oldest = False
             # 检查单chat消息数上限
             if len(messages) >= self.max_messages_per_chat:
                 # 移除最旧的消息
-                messages.pop(0)
+                popped_msg = messages.pop(0)
+                popped_msg_id = getattr(popped_msg, "message_id", None)
+                if popped_msg_id is not None:
+                    msg_ids.discard(popped_msg_id)
+                removed_oldest = True
 
             # 添加新消息
             messages.append(db_msg)
+            if new_msg_id is not None:
+                msg_ids.add(new_msg_id)
             chat_data["ts"] = time.time()
+            self.buffer_a.move_to_end(cid)
 
-            # 更新统计
+            # 更新统计：若达到单chat上限发生替换，则总消息数净变化为 0
             with self._stats_lock:
-                self._total_messages += 1
-                if len(messages) == 1:  # 新增的chat
+                if is_new_chat:
                     self._total_chats += 1
+                if not removed_oldest:
+                    self._total_messages += 1
 
-            # LRU淘汰
-            if self.enable_lru_eviction:
-                self._evict_if_needed()
+            should_evict = self.enable_lru_eviction
 
-            return True
+        # 锁外执行淘汰，避免锁内重操作与事件循环长时间阻塞
+        if should_evict:
+            await self._evict_if_needed()
+
+        return True
 
     def _convert_to_database_messages(self, message: Any, chat_stream: Any = None) -> Optional[Any]:
         """将 MessageSending 或 MessageRecv 转换为 DatabaseMessages
@@ -563,7 +594,6 @@ class FullMessageCache:
                 return False
 
             messages = chat_data["messages"]
-            original_len = len(messages)
 
             # BUG FIX: 兼容 message_id 和 id 字段
             # 优先检查 message_id，然后回退到 id
@@ -573,42 +603,96 @@ class FullMessageCache:
                     return msg_id
                 return getattr(m, "id", None)
 
-            messages[:] = [m for m in messages if _get_msg_id(m) != message_id]
+            kept_messages = []
+            removed_count = 0
+            for m in messages:
+                if _get_msg_id(m) == message_id:
+                    removed_count += 1
+                else:
+                    kept_messages.append(m)
+
+            if removed_count == 0:
+                return False
+
+            messages[:] = kept_messages
+
+            msg_ids = chat_data.get("msg_ids")
+            if isinstance(msg_ids, set):
+                msg_ids.discard(message_id)
+
+            with self._stats_lock:
+                self._total_messages = max(0, self._total_messages - removed_count)
 
             if len(messages) == 0:
                 # 如果chat没有消息了，删除chat
                 del self.buffer_a[cid]
                 with self._stats_lock:
-                    self._total_chats -= 1
-            else:
-                # 更新统计
-                with self._stats_lock:
-                    self._total_messages -= (original_len - len(messages))
+                    self._total_chats = max(0, self._total_chats - 1)
 
-            return len(messages) < original_len
+            return True
 
-    def _evict_if_needed(self):
-        """如果需要，执行LRU淘汰"""
+    async def _evict_if_needed(self):
+        """如果需要，执行LRU淘汰（异步，分批让出事件循环）"""
         if not self.enable_lru_eviction:
             return
 
-        # 检查chat数量上限
-        if self.buffer_a is not None:
-            while len(self.buffer_a) > self.max_chats:
-                old_chat_id, old_chat_data = self.buffer_a.popitem(last=False)
-                old_messages = old_chat_data.get("messages", [])
-                with self._stats_lock:
-                    self._total_messages -= len(old_messages)
-                    self._total_chats -= 1
+        while True:
+            with self.buffer_lock:
+                if self.buffer_a is None:
+                    return
 
-        # 检查总消息数上限
-        if self.buffer_a is not None:
-            while self._total_messages > self.max_total_messages:
-                old_chat_id, old_chat_data = self.buffer_a.popitem(last=False)
-                old_messages = old_chat_data.get("messages", [])
-                with self._stats_lock:
-                    self._total_messages -= len(old_messages)
-                    self._total_chats -= 1
+                chat_count = len(self.buffer_a)
+                message_count = self._total_messages
+                if chat_count <= self.max_chats and message_count <= self.max_total_messages:
+                    return
+
+                # 锁内仅做快照，不做淘汰循环
+                snapshot: List[Tuple[str, int]] = [
+                    (chat_id, len(chat_data.get("messages", [])))
+                    for chat_id, chat_data in self.buffer_a.items()
+                ]
+
+            # 锁外计算需要淘汰的 chat 列表（按 LRU 顺序，最旧优先）
+            overflow_chats = max(0, chat_count - self.max_chats)
+            overflow_messages = max(0, message_count - self.max_total_messages)
+
+            evict_chat_ids: List[str] = []
+            removed_messages_planned = 0
+            for chat_id, msg_len in snapshot:
+                if overflow_chats > 0 or removed_messages_planned < overflow_messages:
+                    evict_chat_ids.append(chat_id)
+                    removed_messages_planned += msg_len
+                    if overflow_chats > 0:
+                        overflow_chats -= 1
+                else:
+                    break
+
+            if not evict_chat_ids:
+                return
+
+            # 分批淘汰，批次间让出事件循环
+            for i in range(0, len(evict_chat_ids), self._yield_batch_size):
+                batch_chat_ids = evict_chat_ids[i : i + self._yield_batch_size]
+                removed_msgs = 0
+                removed_chats = 0
+
+                with self.buffer_lock:
+                    if self.buffer_a is None:
+                        return
+                    for chat_id in batch_chat_ids:
+                        old_chat_data = self.buffer_a.pop(chat_id, None)
+                        if old_chat_data is None:
+                            continue
+                        old_messages = old_chat_data.get("messages", [])
+                        removed_msgs += len(old_messages)
+                        removed_chats += 1
+
+                if removed_chats > 0:
+                    with self._stats_lock:
+                        self._total_messages = max(0, self._total_messages - removed_msgs)
+                        self._total_chats = max(0, self._total_chats - removed_chats)
+
+                await asyncio.sleep(0)
 
     def trigger_incremental_load(self, chat_id: str):
         """触发增量加载（不阻塞）"""
@@ -674,16 +758,16 @@ class FullMessageCache:
             if not messages:
                 return
 
+            # 限制消息数量（锁外处理）
+            if len(messages) > self.max_messages_per_chat:
+                messages = messages[-self.max_messages_per_chat:]
+
+            chat_already_exists = False
             # 更新缓存
             with self.buffer_lock:
                 if self.buffer_a is None:
                     return
 
-                # 限制消息数量
-                if len(messages) > self.max_messages_per_chat:
-                    messages = messages[-self.max_messages_per_chat:]
-
-                # 修复问题4: 使用写时复制策略，同时确保统计更新的原子性
                 # 统计更新必须在锁保护下完成，避免竞态条件
                 with self._stats_lock:
                     # BUG FIX: 检查 chat 是否已存在，避免重复统计
@@ -702,15 +786,23 @@ class FullMessageCache:
                     # 加上新消息数
                     self._total_messages += len(messages)
 
+                msg_ids = {
+                    getattr(existing_msg, "message_id", None)
+                    for existing_msg in messages
+                    if getattr(existing_msg, "message_id", None) is not None
+                }
+
                 # 更新缓存数据（在统计更新之后，避免统计数据不一致）
                 self.buffer_a[chat_id] = {
                     "messages": messages,
+                    "msg_ids": msg_ids,
                     "ts": time.time(),
                 }
                 self.buffer_a.move_to_end(chat_id)
 
-                # LRU淘汰
-                self._evict_if_needed()
+            # 锁外淘汰，避免锁内重操作
+            if self.enable_lru_eviction:
+                await self._evict_if_needed()
 
             logger.debug(f"[FullCache] 增量加载完成 chat_id={chat_id}, 消息数={len(messages)}, 已存在={chat_already_exists}")
         except Exception as e:
@@ -719,8 +811,8 @@ class FullMessageCache:
     async def _load_to_buffer_b(self):
         """缓慢加载数据到缓冲区B
 
-        所有同步 Peewee 数据库查询通过 asyncio.to_thread() 在独立线程中执行，
-        避免阻塞事件循环。
+        数据库查询通过 asyncio.to_thread() 在独立线程中执行；
+        批内 Python 大循环按阈值让出事件循环，避免协程长时间饥饿。
         """
         async with self.load_lock:
             if self.loading:
@@ -733,69 +825,75 @@ class FullMessageCache:
             from src.common.database.database_model import Messages
             from src.common.data_models.database_data_model import DatabaseMessages
 
-            # 将全部同步数据库查询放入线程执行，避免阻塞事件循环
-            def _sync_load_all() -> tuple:
-                """在独立线程中执行所有同步数据库 I/O"""
-                buffer_b_data: OrderedDict = OrderedDict()
-                total_messages = 0
-                total_chats = 0
-                offset = 0
+            buffer_b_data: OrderedDict = OrderedDict()
+            total_messages = 0
+            total_chats = 0
+            offset = 0
+            processed_in_round = 0
 
-                while True:
-                    # Peewee 同步查询 - 在线程中执行不会阻塞事件循环
-                    batch = list(
-                        Messages.select()
-                        .limit(self.batch_size)
-                        .offset(offset)
+            def _sync_fetch_batch(batch_offset: int):
+                return list(
+                    Messages.select()
+                    .limit(self.batch_size)
+                    .offset(batch_offset)
+                )
+
+            while True:
+                # 每批同步查询放入线程，避免阻塞事件循环
+                batch = await asyncio.to_thread(_sync_fetch_batch, offset)
+                if not batch:
+                    break
+
+                # 批内大循环添加 yield 点
+                for msg in batch:
+                    chat_id = str(getattr(msg, "chat_id", ""))
+                    if not chat_id:
+                        continue
+
+                    if chat_id not in buffer_b_data:
+                        buffer_b_data[chat_id] = {
+                            "messages": [],
+                            "msg_ids": set(),
+                            "ts": time.time(),
+                        }
+                        total_chats += 1
+
+                    chat_data = buffer_b_data[chat_id]
+                    messages = chat_data["messages"]
+                    msg_ids = chat_data["msg_ids"]
+
+                    # 限制单 chat 消息数
+                    if len(messages) < self.max_messages_per_chat:
+                        db_msg = DatabaseMessages(**msg.__data__)
+                        messages.append(db_msg)
+                        msg_id = getattr(db_msg, "message_id", None)
+                        if msg_id is not None:
+                            msg_ids.add(msg_id)
+                        total_messages += 1
+
+                    processed_in_round += 1
+                    if processed_in_round >= self._yield_batch_size:
+                        processed_in_round = 0
+                        await asyncio.sleep(0)
+
+                logger.debug(
+                    f"[FullCache] 加载进度: {total_messages} 条消息, "
+                    f"{total_chats} 个聊天"
+                )
+
+                offset += self.batch_size
+
+                if total_messages >= self.max_total_messages:
+                    logger.warning(
+                        f"[FullCache] 达到总消息数上限 "
+                        f"{self.max_total_messages}，停止加载"
                     )
-                    if not batch:
-                        break
+                    break
 
-                    # 按 chat_id 分组
-                    for msg in batch:
-                        chat_id = str(getattr(msg, "chat_id", ""))
-                        if not chat_id:
-                            continue
-
-                        if chat_id not in buffer_b_data:
-                            buffer_b_data[chat_id] = {
-                                "messages": [],
-                                "ts": time.time(),
-                            }
-                            total_chats += 1
-
-                        chat_data = buffer_b_data[chat_id]
-                        messages = chat_data["messages"]
-
-                        # 限制单 chat 消息数
-                        if len(messages) < self.max_messages_per_chat:
-                            db_msg = DatabaseMessages(**msg.__data__)
-                            messages.append(db_msg)
-                            total_messages += 1
-
-                    logger.debug(
-                        f"[FullCache] 加载进度: {total_messages} 条消息, "
-                        f"{total_chats} 个聊天"
-                    )
-
-                    # 在线程中使用 time.sleep 进行批间延迟，不影响事件循环
-                    if self.batch_delay > 0:
-                        time.sleep(self.batch_delay)
-
-                    offset += self.batch_size
-
-                    if total_messages >= self.max_total_messages:
-                        logger.warning(
-                            f"[FullCache] 达到总消息数上限 "
-                            f"{self.max_total_messages}，停止加载"
-                        )
-                        break
-
-                return buffer_b_data, total_messages, total_chats
-
-            buffer_b_data, total_messages, total_chats = await asyncio.to_thread(
-                _sync_load_all
-            )
+                if self.batch_delay > 0:
+                    await asyncio.sleep(self.batch_delay)
+                else:
+                    await asyncio.sleep(0)
 
             # 加载完成，原子切换
             with self.buffer_lock:
@@ -1040,7 +1138,7 @@ class FullMessageCacheModule:
                         # 先写入缓存（立即生效）
                         chat_id = getattr(chat_stream, "stream_id", None)
                         if chat_id:
-                            module.cache.add_message(chat_id, message, chat_stream)
+                            await module.cache.add_message(chat_id, message, chat_stream)
 
                         # 异步写入数据库
                         if callable(orig_store_callable):

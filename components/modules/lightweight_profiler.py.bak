@@ -115,12 +115,9 @@ except Exception:
                 return int(size)
 
 
-@dataclass(slots=True)
+@dataclass
 class _AggTiming:
-    """聚合计时统计（仅聚合，避免高内存开销）。
-
-    使用 `slots=True`：该结构高频创建且字段固定，不依赖动态属性。
-    """
+    """聚合计时统计（仅聚合，避免高内存开销）。"""
 
     calls: int = 0
     total_time: float = 0.0
@@ -134,12 +131,7 @@ class _AggTiming:
 
 
 class _StatsAdapter:
-    """StatsReporter 适配器：提供 total()/reset_interval() 两个方法。
-
-    使用 `__slots__`：仅持有 `_module` 单一引用，实例数量可观且字段固定。
-    """
-
-    __slots__ = ("_module",)
+    """StatsReporter 适配器：提供 total()/reset_interval() 两个方法。"""
 
     def __init__(self, module: "LightweightProfilerModule"):
         self._module = module
@@ -200,12 +192,7 @@ def profile_func(name: str) -> Callable[[Callable[..., Any]], Callable[..., Any]
 
 
 class ProfileContext:
-    """上下文管理器：记录代码块耗时（采样）。
-
-    使用 `__slots__`：生命周期短、创建频繁，字段集合固定。
-    """
-
-    __slots__ = ("_name", "_mod", "_t0", "_enabled")
+    """上下文管理器：记录代码块耗时（采样）。"""
 
     def __init__(self, name: str):
         self._name = str(name)

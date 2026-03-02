@@ -17,7 +17,7 @@ import threading
 import time
 import traceback
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 
 
 @dataclass
@@ -165,9 +165,25 @@ class NotificationLogHandler(logging.Handler):
         Returns:
             错误签名（MD5哈希）
         """
-        # 使用文件名、行号、函数名和错误消息作为签名基础
-        signature_base = f"{record.pathname}:{record.lineno}:{record.funcName}:{record.getMessage()}"
+        # 使用脱敏后的文件名、行号、函数名和错误消息作为签名基础
+        safe_filename = self._sanitize_path(record.pathname)
+        signature_base = f"{safe_filename}:{record.lineno}:{record.funcName}:{record.getMessage()}"
         return hashlib.md5(signature_base.encode()).hexdigest()
+
+    def _sanitize_path(self, pathname: str) -> str:
+        """脱敏文件路径，只保留文件名部分
+
+        Args:
+            pathname: 完整文件路径
+
+        Returns:
+            脱敏后的路径（仅文件名）
+        """
+        if not pathname:
+            return "<unknown>"
+        # 只保留文件名，隐藏完整路径
+        import os
+        return os.path.basename(pathname)
 
     def _is_duplicated(self, signature: str) -> bool:
         """检查是否重复
@@ -208,18 +224,38 @@ class NotificationLogHandler(logging.Handler):
         """
         lines = []
 
-        # 基本信息
+        # 基本信息（路径脱敏）
+        safe_filename = self._sanitize_path(record.pathname)
         lines.append(f"【{record.levelname}】{record.name}")
-        lines.append(f"位置: {record.pathname}:{record.lineno}")
+        lines.append(f"位置: {safe_filename}:{record.lineno}")
         lines.append(f"函数: {record.funcName}")
         lines.append(f"消息: {record.getMessage()}")
 
-        # 堆栈跟踪
+        # 堆栈跟踪（脱敏处理）
         if self._config.include_stacktrace and record.exc_info:
-            exc_text = "".join(traceback.format_exception(*record.exc_info))
-            lines.append(f"\n堆栈跟踪:\n{exc_text}")
+            exc_text = self._sanitize_traceback(traceback.format_exception(*record.exc_info))
+            lines.append(f"\n堆栈跟踪:\n{''.join(exc_text)}")
 
         return "\n".join(lines)
+
+    def _sanitize_traceback(self, tb_lines: List[str]) -> str:
+        """脱敏堆栈跟踪中的文件路径
+
+        Args:
+            tb_lines: 堆栈跟踪行列表
+
+        Returns:
+            脱敏后的堆栈跟踪文本
+        """
+        import re
+        result = []
+        # 匹配 File "路径" 格式
+        file_pattern = re.compile(r'File "([^"]+)"')
+        for line in tb_lines:
+            # 替换完整路径为仅文件名
+            sanitized = file_pattern.sub(lambda m: f'File "{self._sanitize_path(m.group(1))}"', line)
+            result.append(sanitized)
+        return ''.join(result)
 
     def _send_notification(self, record: logging.LogRecord, content: str):
         """发送通知
@@ -235,14 +271,15 @@ class NotificationLogHandler(logging.Handler):
             # 确定通知级别
             level = "error" if record.levelno == logging.ERROR else "critical"
 
-            # 发送通知
+            # 发送通知（路径脱敏）
+            safe_filename = self._sanitize_path(record.pathname)
             self._notification_manager.send_notification(
                 template_key="error_log",
                 level=level,
                 variables={
                     "error_type": record.levelname,
                     "error_message": record.getMessage(),
-                    "error_location": f"{record.pathname}:{record.lineno}",
+                    "error_location": f"{safe_filename}:{record.lineno}",
                     "error_function": record.funcName,
                     "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
                 },

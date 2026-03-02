@@ -61,7 +61,7 @@ CM-Performance-Optimizer 采用 **模块化分层架构**，遵循以下核心�
 ├─────────────────────────────────────────────────────────────────┤
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐  │
 │  │  PatchChain  │  │   TTLCache   │  │    双缓冲切换机制    │  │
-│  │   方法拦截    │  │   过期淘汰    │  │  热更新零感知        │  │
+│  │   方法拦截    │  │   过期淘汰    │  │  分批加载+原子切换   │  │
 │  └──────────────┘  └──────────────┘  └──────────────────────┘  │
 ├─────────────────────────────────────────────────────────────────┤
 │  ┌─────────────────────────────────────────────────────────────┐│
@@ -79,7 +79,7 @@ CM-Performance-Optimizer 采用 **模块化分层架构**，遵循以下核心�
 |------|---------|------|
 | **PatchChain** | 运行时方法拦截 | 无侵入增强现有功能 |
 | **TTLCache** | 缓存过期策略 | 内存友好、自动淘汰 |
-| **双缓冲 (Dual Buffer)** | 热数据更新 | 更新期间零抖动、原子切换 |
+| **双缓冲 (Dual Buffer)** | 热数据更新 | 分批加载 + yield 让出 + 原子切换 |
 | **Aho-Corasick** | 多模式字符串匹配 | O(n) 线性复杂度、100x+ 加速 |
 | **rapidfuzz** | 编辑距离计算 | C 扩展 10-50x 加速 |
 | **Parquet** | 知识图谱序列化 | 列式存储 5x I/O 加速 |
@@ -118,7 +118,7 @@ CM-Performance-Optimizer 采用 **模块化分层架构**，遵循以下核心�
 **双缓冲模式**：
 - `query` 模式：仅缓存查询结果对象
 - `full` 模式：缓存完整消息数据（适用于高消息量场景）
-- 切换时使用原子指针交换，无锁阻塞
+- 切换时采用分批加载 + yield 让出事件循环，最小化锁持有时间
 
 #### 1.2 person_cache — 人物信息缓存
 
@@ -141,8 +141,8 @@ CM-Performance-Optimizer 采用 **模块化分层架构**，遵循以下核心�
 | 项目 | 说明 |
 |------|------|
 | **功能** | 将所有表达式加载到内存，实现微秒级查询 |
-| **关键技术** | 双缓冲 + 原子切换 + 后台增量加载 |
-| **配置参数** | `batch_size`(50-500), `refresh_interval`(600-86400s), `incremental_refresh_interval`(60-3600s) |
+| **关键技术** | 双缓冲 + 分批 yield + 原子切换 + 后台增量加载 |
+| **配置参数** | `batch_size`(50-500), `batch_delay`(0.01-1.0), `refresh_interval`(600-86400s), `max_items`, `max_memory_mb` |
 | **性能收益** | 100% 消除数据库查询（命中时），延迟 < 0.1ms |
 | **内存估算** | ~100MB（取决于表达式数量） |
 | **降级机制** | 后台刷新失败不影响现有缓存；提供 `json-repair` 修复极端脏数据 |
@@ -150,15 +150,20 @@ CM-Performance-Optimizer 采用 **模块化分层架构**，遵循以下核心�
 **刷新策略**：
 - **增量刷新**：每 10 分钟检查变化，仅更新差异部分
 - **全量重建**：每 24 小时完整重建索引
-- **原子切换**：新缓存构建完成后原子替换旧缓存，零感知热更新
+- **平滑切换**：新缓存构建完成后原子替换旧缓存，构建期间分批 yield 让出事件循环
+
+**内存保护**：
+- `max_items`：缓存最大条目数限制（默认 10000）
+- `max_memory_mb`：缓存最大内存使用量（默认 200MB）
+- 超出限制时使用 heapq.nsmallest 批量淘汰 LRU 条目
 
 #### 1.4 jargon_cache — 黑话全量缓存
 
 | 项目 | 说明 |
 |------|------|
 | **功能** | 将所有黑话数据加载到内存，支持高速匹配 |
-| **关键技术** | 双缓冲 + 内容索引 + Aho-Corasick 自动机 |
-| **配置参数** | `batch_size`, `refresh_interval`, `enable_content_index` |
+| **关键技术** | 双缓冲 + 内容索引 + Aho-Corasick 自动机 + 分批 yield |
+| **配置参数** | `batch_size`(50-500), `batch_delay`(0.01-1.0), `refresh_interval`(600-86400s) |
 | **性能收益** | 10-100x 匹配加速，延迟 < 1ms |
 | **内存估算** | ~20MB / 万条黑话 |
 | **降级机制** | 索引构建失败回退到线性扫描；可选内容索引加速 |
@@ -173,8 +178,8 @@ CM-Performance-Optimizer 采用 **模块化分层架构**，遵循以下核心�
 | 项目 | 说明 |
 |------|------|
 | **功能** | 缓存知识图谱数据，支持 Parquet 高效序列化 |
-| **关键技术** | 双缓冲 + 文件哈希校验 + Parquet 列式存储 |
-| **配置参数** | `batch_size`, `refresh_interval`, `use_parquet` |
+| **关键技术** | 双缓冲 + 文件哈希校验 + Parquet 列式存储 + 分批 yield |
+| **配置参数** | `batch_size`(50-500), `batch_delay`(0.01-1.0), `refresh_interval`(600-86400s), `use_parquet` |
 | **性能收益** | 5x I/O 性能提升，按需加载减少内存占用 |
 | **内存估算** | 可配置（按需加载） |
 | **降级机制** | Parquet 不可用时回退到 JSON；文件损坏自动降级到数据库查询 |
@@ -412,14 +417,21 @@ warmup_max_persons = 30
 refresh_interval = 3600
 incremental_refresh_interval = 600
 batch_size = 100
+batch_delay = 0.05
+max_items = 10000
+max_memory_mb = 200
 
 [jargon_cache]
 enable_content_index = true
 refresh_interval = 3600
+batch_size = 100
+batch_delay = 0.05
 
 [kg_cache]
 use_parquet = true
 refresh_interval = 7200
+batch_size = 100
+batch_delay = 0.05
 
 [db_tuning]
 mmap_size = 536870912  # 512MB
@@ -567,17 +579,41 @@ warmup_ttl = 120              # 预热记录有效期
 warmup_debounce_seconds = 3.0 # 防抖时间
 ```
 
-### 3. 双缓冲热更新
+### 3. 双缓冲平滑更新
 
-表达式、黑话、知识图谱等大缓存支持热更新：
+表达式、黑话、知识图谱等大缓存支持平滑热更新，通过分批处理避免事件循环阻塞：
 
 ```toml
 [expression_cache]
-refresh_interval = 3600        # 每小时检查更新
-incremental_refresh_interval = 600  # 增量刷新间隔
-incremental_threshold_ratio = 0.1   # 10% 变化时触发增量刷新
-full_rebuild_interval = 86400       # 每天全量重建
+refresh_interval = 3600        # 全量刷新间隔（秒）
+incremental_refresh_interval = 600  # 增量刷新间隔（秒）
+batch_size = 100               # 每批加载条目数（50-500）
+batch_delay = 0.05             # 批次间延迟秒数（0.01-1.0）
+max_items = 10000              # 缓存最大条目数
+max_memory_mb = 200            # 缓存最大内存（MB）
+
+[jargon_cache]
+refresh_interval = 3600
+batch_size = 100
+batch_delay = 0.05
+enable_content_index = true    # 启用内容索引加速
+
+[kg_cache]
+refresh_interval = 7200
+batch_size = 100
+batch_delay = 0.05
+use_parquet = true             # 使用 Parquet 格式加速 I/O
 ```
+
+**配置参数说明**：
+
+| 参数 | 类型 | 默认值 | 范围 | 说明 |
+|------|------|--------|------|------|
+| `batch_size` | int | 100 | 50-500 | 每批加载的条目数，影响内存峰值 |
+| `batch_delay` | float | 0.05 | 0.01-1.0 | 批次间延迟秒数，让出事件循环 |
+| `max_items` | int | 10000 | 1+ | 缓存最大条目数（仅 expression_cache） |
+| `max_memory_mb` | int | 200 | 1+ | 缓存最大内存 MB（仅 expression_cache） |
+| `refresh_interval` | int | 3600 | 60-86400 | 全量刷新间隔秒数 |
 
 ### 4. 数据库调优精细控制
 
@@ -635,9 +671,9 @@ def patched_find_messages(self, query):
 patch_method(MessageRepository, 'find_messages', patched_find_messages)
 ```
 
-### 2. 双缓冲原子切换
+### 2. 双缓冲平滑切换
 
-大缓存更新采用双缓冲设计，确保更新期间无感知：
+大缓存更新采用双缓冲设计，通过分批加载 + yield 让出 + 原子切换实现平滑更新：
 
 ```python
 class DualBuffer:
@@ -645,21 +681,32 @@ class DualBuffer:
         self._buffer_a = {}  # 当前活跃缓存
         self._buffer_b = {}  # 后台构建缓存
         self._using_a = True
+        self._yield_batch_size = 500  # 每 500 条让出事件循环
     
-    def update(self, new_data):
-        # 后台构建新缓存
-        self._buffer_b = self._build_index(new_data)
+    async def update(self, new_data):
+        # 后台分批构建新缓存
+        for i in range(0, len(new_data), self._yield_batch_size):
+            batch = new_data[i:i + self._yield_batch_size]
+            self._buffer_b.update(self._build_batch(batch))
+            await asyncio.sleep(0)  # 让出事件循环，保持响应
         
-        # 原子切换
-        if self._using_a:
-            self._buffer_a = self._buffer_b
-        else:
-            self._buffer_b = self._buffer_a
-        self._using_a = not self._using_a
+        # 原子切换（锁内仅赋值）
+        with self._lock:
+            self._buffer_a, self._buffer_b = self._buffer_b, {}
+            self._using_a = not self._using_a
     
     def get_active(self):
         return self._buffer_a if self._using_a else self._buffer_b
 ```
+
+**核心优化策略**：
+
+| 策略 | 说明 | 效果 |
+|------|------|------|
+| **分批处理** | 大规模数据按 `batch_size` 分批加载 | 避免长时间阻塞 |
+| **yield 让出** | 每批处理后 `await asyncio.sleep(0)` | 事件循环保持响应 |
+| **锁最小化** | 重操作在锁外完成，锁内仅原子赋值 | 缩短锁持有时间 |
+| **O(n log k) 淘汰** | 使用 `heapq.nsmallest` 替代 O(n²) 扫描 | 大规模淘汰加速 |
 
 ### 3. 优雅降级机制
 

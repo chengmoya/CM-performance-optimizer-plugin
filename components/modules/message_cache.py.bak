@@ -169,19 +169,17 @@ except (ImportError, CoreModuleLoadError) as e:
                 if k in self._data:
                     value, expiry = self._data[k]
                     if time.time() <= expiry:
-                        self._data.move_to_end(k)
                         return value, True
-                    del self._data[k]
+                    else:
+                        del self._data[k]
                 return None, False
         
         def set_sync(self, k, v):
             """同步设置缓存值"""
             with self._sync_lock:
                 expiry = time.time() + self.ttl
-                if k in self._data:
-                    self._data.move_to_end(k)
                 self._data[k] = (v, expiry)
-
+                
                 # O(1) LRU eviction
                 while len(self._data) > self.max_size:
                     self._data.popitem(last=False)
@@ -1241,8 +1239,8 @@ class MessageCacheModule:
                         if hasattr(module.stats, "hotset_miss"):
                             module.stats.hotset_miss()
                         module.hotset.ensure_warmup(str(chat_id))
-                except (TypeError, ValueError, AttributeError) as e:
-                    logger.debug(f"[MsgCache] hotset fastpath skipped: {e}")
+                except Exception:
+                    pass
 
                 # ---- 1) query-cache：稳定 key 的查询结果缓存 ----
                 # 使用稳定的缓存键生成方法（并返回该查询是否建议缓存）

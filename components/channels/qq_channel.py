@@ -212,12 +212,7 @@ class QQNotificationChannel(NotificationChannel):
         return results
 
     async def _send_private_message(self, user_id: int, message: str) -> bool:
-        """发送私聊消息
-
-        尝试多种方式发送消息：
-        1. 通过Bot实例发送
-        2. 通过API客户端发送
-        3. 降级到日志输出
+        """通过 MaiBot 标准 API 发送 QQ 私聊消息。
 
         Args:
             user_id: 目标用户ID
@@ -226,57 +221,29 @@ class QQNotificationChannel(NotificationChannel):
         Returns:
             是否发送成功
         """
-        # 方式1: 通过Bot实例发送
-        if self._bot_instance is not None:
-            try:
-                # 尝试调用 send_private_msg 方法（OneBot标准）
-                if hasattr(self._bot_instance, "send_private_msg"):
-                    await self._bot_instance.send_private_msg(
-                        user_id=user_id, message=message
-                    )
-                    return True
-                # 尝试调用 call_api 方法
-                elif hasattr(self._bot_instance, "call_api"):
-                    await self._bot_instance.call_api(
-                        "send_private_msg", user_id=user_id, message=message
-                    )
-                    return True
-                # 尝试异步发送方法
-                elif hasattr(self._bot_instance, "send_private_message"):
-                    await self._bot_instance.send_private_message(user_id, message)
-                    return True
-            except Exception as e:
-                logger.warning(f"[QQChannel] Bot实例发送失败: {e}")
-
-        # 方式2: 通过API客户端发送
-        if self._api_client is not None:
-            try:
-                if hasattr(self._api_client, "send_private_msg"):
-                    await self._api_client.send_private_msg(
-                        user_id=user_id, message=message
-                    )
-                    return True
-            except Exception as e:
-                logger.warning(f"[QQChannel] API客户端发送失败: {e}")
-
-        # 方式3: 尝试从全局获取Bot实例
         try:
-            bot = await self._get_bot_instance()
-            if bot is not None:
-                if hasattr(bot, "send_private_msg"):
-                    await bot.send_private_msg(user_id=user_id, message=message)
-                    return True
-                elif hasattr(bot, "call_api"):
-                    await bot.call_api(
-                        "send_private_msg", user_id=user_id, message=message
-                    )
-                    return True
-        except Exception as e:
-            logger.debug(f"[QQChannel] 全局Bot实例获取失败: {e}")
+            from src.plugin_system import chat_api, send_api
 
-        # 降级：输出到日志
-        logger.info(f"[QQChannel] [降级输出] 发送给 {user_id}:\n{message}")
-        return True  # 降级输出视为成功
+            stream = chat_api.get_stream_by_user_id(
+                user_id=str(user_id),
+                platform="qq",
+            )
+            if stream is None:
+                logger.warning(f"[QQChannel] 未找到私聊流，无法发送消息: user_id={user_id}")
+                return False
+
+            success = await send_api.text_to_stream(
+                text=message,
+                stream_id=stream.stream_id,
+                typing=False,
+                storage_message=True,
+            )
+            if not success:
+                logger.warning(f"[QQChannel] send_api 发送失败: user_id={user_id}")
+            return bool(success)
+        except Exception as e:
+            logger.error(f"[QQChannel] 使用 send_api 发送私聊消息异常: {e}")
+            return False
 
     async def _get_bot_instance(self) -> Optional[Any]:
         """尝试获取Bot实例
@@ -286,13 +253,12 @@ class QQNotificationChannel(NotificationChannel):
         """
         # 尝试从MaiBot获取Bot实例
         try:
-            # 方式1: 从全局变量获取
-            from src.plugin_system.base import bot_manager
+            # 方式1: 从全局ChatBot实例获取
+            from src.chat.message_receive.bot import chat_bot
 
-            if hasattr(bot_manager, "get_bot"):
-                return bot_manager.get_bot()
-            elif hasattr(bot_manager, "bot"):
-                return bot_manager.bot
+            bot = getattr(chat_bot, "bot", None)
+            if bot is not None:
+                return bot
         except ImportError:
             pass
         except Exception as e:

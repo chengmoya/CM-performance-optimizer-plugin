@@ -143,17 +143,15 @@ except (ImportError, CoreModuleLoadError) as e:
                 if k in self._data:
                     value, expiry = self._data[k]
                     if time.time() <= expiry:
-                        self._data.move_to_end(k)
                         return value, True
-                    del self._data[k]
+                    else:
+                        del self._data[k]
                 return None, False
         
         def set_sync(self, k, v):
             """同步设置缓存值"""
             with self._sync_lock:
                 expiry = time.time() + self.ttl
-                if k in self._data:
-                    self._data.move_to_end(k)
                 self._data[k] = (v, expiry)
 
                 # O(1) LRU eviction
@@ -806,12 +804,9 @@ class PersonCacheModule:
                     module.cache.set_sync(person_id, data)
             
             def cached_sync(self_person):
-                """同步版本的 cached_sync 函数，与原始 sync_to_database 签名一致。
-
-                失效时机策略：仅在 DB 同步成功后失效缓存；若写入失败则保留旧缓存。
-                """
-                module._orig_sync(self_person)
+                """同步版本的 cached_sync 函数，与原始 sync_to_database 签名一致"""
                 module.cache.invalidate_sync(self_person.person_id)
+                module._orig_sync(self_person)
             
             Person.load_from_database = cached_load
             Person.sync_to_database = cached_sync

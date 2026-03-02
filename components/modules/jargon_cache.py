@@ -321,6 +321,9 @@ class JargonCacheModule:
             "incremental_refresh_count": 0,
         }
 
+        # 大循环分批让出事件循环阈值
+        self._yield_batch_size = max(100, self.batch_size * 5)
+
         # 状态
         self.loading = False
         self.load_lock = asyncio.Lock()
@@ -547,6 +550,26 @@ class JargonCacheModule:
         self._tracker["last_full_rebuild"] = state.last_full_rebuild
         self._tracker["incremental_refresh_count"] = state.incremental_refresh_count
 
+    async def _rebuild_content_index(self, buffer_data: List[Any]) -> Optional[Dict[str, List[Any]]]:
+        """重建内容索引（锁外执行）"""
+        if not self.enable_content_index:
+            return None
+
+        content_index: Dict[str, List[Any]] = {}
+        for idx, jargon in enumerate(buffer_data):
+            if idx > 0 and idx % self._yield_batch_size == 0:
+                await asyncio.sleep(0)
+
+            content = getattr(jargon, "content", None)
+            if not content:
+                continue
+            key = str(content).strip().lower()
+            if not key:
+                continue
+            content_index.setdefault(key, []).append(jargon)
+
+        return content_index
+
     async def _merge_incremental_data(self, incremental_data: List[Any]) -> None:
         """合并增量数据到缓存
 
@@ -554,57 +577,39 @@ class JargonCacheModule:
             incremental_data: 增量数据列表
         """
         with self.buffer_lock:
-            # 复制现有数据
-            if self.buffer_a is not None:
-                buffer_b_data = list(self.buffer_a)
-                content_index_b = {}
-                if self.content_index_a:
-                    # 深拷贝索引
-                    for k, v in self.content_index_a.items():
-                        content_index_b[k] = list(v)
+            current_buffer = list(self.buffer_a) if self.buffer_a is not None else []
+
+        # 构建 ID -> 位置映射，避免 O(n²) 替换
+        existing_pos: Dict[Any, int] = {}
+        for idx, item in enumerate(current_buffer):
+            if idx > 0 and idx % self._yield_batch_size == 0:
+                await asyncio.sleep(0)
+            item_id = getattr(item, "id", None)
+            if item_id is not None:
+                existing_pos[item_id] = idx
+
+        buffer_b_data = current_buffer
+
+        # 合并新数据（锁外）
+        for idx, item in enumerate(incremental_data):
+            if idx > 0 and idx % self._yield_batch_size == 0:
+                await asyncio.sleep(0)
+
+            item_id = getattr(item, "id", None)
+            if item_id is not None and item_id in existing_pos:
+                buffer_b_data[existing_pos[item_id]] = item
             else:
-                buffer_b_data = []
-                content_index_b = {}
+                buffer_b_data.append(item)
+                if item_id is not None:
+                    existing_pos[item_id] = len(buffer_b_data) - 1
 
-            # 构建 ID 集合用于去重
-            existing_ids = {getattr(item, 'id', None) for item in buffer_b_data}
+        content_index_b = await self._rebuild_content_index(buffer_b_data)
 
-            # 合并新数据
-            for item in incremental_data:
-                item_id = getattr(item, 'id', None)
-
-                # 更新或追加
-                if item_id in existing_ids:
-                    # 替换已存在的记录
-                    for i, existing in enumerate(buffer_b_data):
-                        if getattr(existing, 'id', None) == item_id:
-                            buffer_b_data[i] = item
-                            break
-                else:
-                    # 追加新记录
-                    buffer_b_data.append(item)
-                    existing_ids.add(item_id)
-
-                # 更新内容索引
-                if self.enable_content_index:
-                    content = getattr(item, 'content', None)
-                    if content:
-                        key = str(content).strip().lower()
-                        if key:
-                            # 移除旧记录的同 ID 项
-                            if key in content_index_b:
-                                content_index_b[key] = [
-                                    x for x in content_index_b[key]
-                                    if getattr(x, 'id', None) != item_id
-                                ]
-                            content_index_b.setdefault(key, []).append(item)
-
-            # 更新总数
-            self._tracker["total_count"] = len(buffer_b_data)
-
-            # 原子切换
+        # 锁内仅做原子交换
+        with self.buffer_lock:
             self.buffer_b = buffer_b_data
             self.content_index_b = content_index_b
+            self._tracker["total_count"] = len(buffer_b_data)
             self.buffer_a, self.buffer_b = self.buffer_b, None
             self.content_index_a, self.content_index_b = self.content_index_b, None
 
@@ -622,7 +627,9 @@ class JargonCacheModule:
             with self.buffer_lock:
                 if self.buffer_a is None:
                     return
-                cache_count = len(self.buffer_a)
+                current_buffer = list(self.buffer_a)
+
+            cache_count = len(current_buffer)
 
             # 如果数量一致，跳过详细检测
             if db_count == cache_count:
@@ -637,14 +644,15 @@ class JargonCacheModule:
                 lambda: [r.id for r in Jargon.select(Jargon.id)]
             ))
 
-            # 获取缓存中的 ID
-            with self.buffer_lock:
-                if self.buffer_a is None:
-                    return
-                cache_ids = {getattr(item, 'id', None) for item in self.buffer_a}
+            # 找出已删除的 ID（锁外）
+            deleted_ids: Set[Any] = set()
+            for idx, item in enumerate(current_buffer):
+                if idx > 0 and idx % self._yield_batch_size == 0:
+                    await asyncio.sleep(0)
 
-            # 找出已删除的 ID
-            deleted_ids = cache_ids - db_ids
+                item_id = getattr(item, "id", None)
+                if item_id is not None and item_id not in db_ids:
+                    deleted_ids.add(item_id)
 
             if not deleted_ids:
                 logger.debug("[JargonCache] 未检测到已删除记录")
@@ -652,31 +660,22 @@ class JargonCacheModule:
 
             logger.info(f"[JargonCache] 检测到 {len(deleted_ids)} 条已删除记录，执行清理...")
 
-            # 3. 清理已删除的记录
+            # 3. 过滤已删除记录（锁外）
+            buffer_b_data: List[Any] = []
+            for idx, item in enumerate(current_buffer):
+                if idx > 0 and idx % self._yield_batch_size == 0:
+                    await asyncio.sleep(0)
+                if getattr(item, "id", None) in deleted_ids:
+                    continue
+                buffer_b_data.append(item)
+
+            content_index_b = await self._rebuild_content_index(buffer_b_data)
+
+            # 锁内仅做原子交换
             with self.buffer_lock:
-                if self.buffer_a is None:
-                    return
-
-                # 过滤已删除的记录
-                buffer_b_data = [
-                    item for item in self.buffer_a
-                    if getattr(item, 'id', None) not in deleted_ids
-                ]
-
-                # 更新内容索引
-                content_index_b = {}
-                if self.enable_content_index and self.content_index_a:
-                    for k, v in self.content_index_a.items():
-                        filtered = [x for x in v if getattr(x, 'id', None) not in deleted_ids]
-                        if filtered:
-                            content_index_b[k] = filtered
-
-                # 更新总数
-                self._tracker["total_count"] = len(buffer_b_data)
-
-                # 原子切换
                 self.buffer_b = buffer_b_data
                 self.content_index_b = content_index_b
+                self._tracker["total_count"] = len(buffer_b_data)
                 self.buffer_a, self.buffer_b = self.buffer_b, None
                 self.content_index_a, self.content_index_b = self.content_index_b, None
 
@@ -721,15 +720,16 @@ class JargonCacheModule:
                     # 添加到缓冲区 B
                     buffer_b_data.extend(batch)
 
-                    # 更新最大 ID
-                    for item in batch:
-                        item_id = getattr(item, 'id', 0)
+                    # 更新最大 ID + 构建内容索引（锁外）
+                    for idx, jargon in enumerate(batch):
+                        if idx > 0 and idx % self._yield_batch_size == 0:
+                            await asyncio.sleep(0)
+
+                        item_id = getattr(jargon, 'id', 0)
                         if item_id > max_id:
                             max_id = item_id
-                    
-                    # 构建内容索引（同 content 可能多条记录，必须用列表避免覆盖）
-                    if self.enable_content_index and content_index_b is not None:
-                        for jargon in batch:
+
+                        if self.enable_content_index and content_index_b is not None:
                             content = getattr(jargon, "content", None)
                             if not content:
                                 continue
@@ -1204,7 +1204,10 @@ class JargonCacheModule:
             self._patched_search_jargon = None
 
 
-def apply_jargon_cache(cache_manager) -> Optional[JargonCacheModule]:
+def apply_jargon_cache(
+    cache_manager,
+    config: Optional[Dict[str, Any]] = None,
+) -> Optional[JargonCacheModule]:
     """应用黑话缓存补丁
 
     适配新版 MaiBot：黑话查询入口位于 [`src.bw_learner.jargon_miner.search_jargon()`](../src/bw_learner/jargon_miner.py:617)。
@@ -1217,7 +1220,17 @@ def apply_jargon_cache(cache_manager) -> Optional[JargonCacheModule]:
         JargonCacheModule 实例，失败时返回 None
     """
     try:
-        cache = JargonCacheModule()
+        cfg = config or {}
+        cache = JargonCacheModule(
+            batch_size=int(cfg.get("batch_size", 100)),
+            batch_delay=float(cfg.get("batch_delay", 0.05)),
+            refresh_interval=int(cfg.get("refresh_interval", 3600)),
+            enable_content_index=bool(cfg.get("enable_content_index", True)),
+            incremental_refresh_interval=int(cfg.get("incremental_refresh_interval", 600)),
+            incremental_threshold_ratio=float(cfg.get("incremental_threshold_ratio", 0.1)),
+            full_rebuild_interval=int(cfg.get("full_rebuild_interval", 86400)),
+            deletion_check_interval=int(cfg.get("deletion_check_interval", 10)),
+        )
         cache_manager.register_cache("jargon_cache", cache)
 
         try:

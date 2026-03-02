@@ -9,7 +9,6 @@
 from __future__ import annotations
 
 import asyncio
-import heapq
 import sys
 import threading
 import time
@@ -254,9 +253,6 @@ class ExpressionCacheModule:
         deletion_check_interval: int = 10,
         # 支持传入 ExpirationConfig
         expiration_config: Optional["ExpirationConfig"] = None,
-        # P0-001: 内存上限保护参数
-        max_items: int = 10000,
-        max_memory_mb: int = 200,
     ):
         """初始化表达式缓存模块
 
@@ -269,8 +265,6 @@ class ExpressionCacheModule:
             full_rebuild_interval: 全量重建间隔秒数，默认 86400（24小时）
             deletion_check_interval: 删除检测间隔（每 N 次增量刷新），默认 10
             expiration_config: 过期配置对象，如果提供则覆盖单独的参数
-            max_items: 缓存最大条目数，默认 10000
-            max_memory_mb: 缓存最大内存使用量（MB），默认 200
         """
         # 双缓冲
         self.buffer_a: Optional[List[Any]] = None  # 当前使用的缓存（Expression 模型列表）
@@ -284,13 +278,6 @@ class ExpressionCacheModule:
         self.batch_size = max(1, int(batch_size))
         self.batch_delay = max(0.001, float(batch_delay))
         self.refresh_interval = max(60, int(refresh_interval))
-        # 大循环分批让出事件循环的批大小
-        self._yield_batch_size = max(100, self.batch_size * 5)
-
-        # P0-001: 内存上限配置
-        self.max_items = max(1, int(max_items))
-        self.max_memory_bytes = max_memory_mb * 1024 * 1024  # 转换为字节
-        self._current_memory_usage = 0  # 缓存当前内存使用量
 
         # 初始化过期管理器
         if expiration_config is not None:
@@ -344,114 +331,7 @@ class ExpressionCacheModule:
         
         # 启动时立即开始加载
         self._schedule_initial_load()
-
-    def _estimate_buffer_memory(self, buffer: Optional[List[Any]], index: Optional[Dict[str, List[Any]]] = None) -> int:
-        """估算缓冲区内存使用量
-
-        Args:
-            buffer: 数据缓冲区
-            index: 索引缓冲区（可选）
-
-        Returns:
-            估算的内存使用量（字节）
-        """
-        if buffer is None:
-            return 0
-        size = MemoryUtils.get_size(buffer)
-        if index is not None:
-            size += MemoryUtils.get_size(index)
-        return size
-
-    def _item_lru_timestamp(self, item: Any) -> float:
-        """提取条目的 LRU 时间戳（越小越旧）。"""
-        item_time = getattr(item, "last_active_time", None)
-        if item_time is None:
-            item_time = getattr(item, "create_date", 0) or 0
-        try:
-            return float(item_time)
-        except (TypeError, ValueError):
-            return 0.0
-
-    def _item_identity(self, item: Any) -> tuple[str, Any]:
-        """获取条目唯一标识：优先使用业务 id，回退到对象 id。"""
-        item_id = getattr(item, "id", None)
-        if item_id is not None:
-            return ("id", item_id)
-        return ("obj", id(item))
-
-    async def _evict_from_buffer(
-        self,
-        buffer: List[Any],
-        evict_identities: set[tuple[str, Any]],
-    ) -> tuple[List[Any], int]:
-        """按标识批量淘汰条目，并在大循环中让出事件循环。"""
-        if not evict_identities:
-            return buffer, 0
-
-        new_buffer: List[Any] = []
-        removed = 0
-        for idx, item in enumerate(buffer):
-            if idx > 0 and idx % self._yield_batch_size == 0:
-                await asyncio.sleep(0)
-            if self._item_identity(item) in evict_identities:
-                removed += 1
-                continue
-            new_buffer.append(item)
-        return new_buffer, removed
-
-    async def _rebuild_chat_index(self, buffer: List[Any]) -> Dict[str, List[Any]]:
-        """基于 buffer 重建 chat_id 索引，并在大循环中让出事件循环。"""
-        rebuilt: Dict[str, List[Any]] = {}
-        for idx, item in enumerate(buffer):
-            if idx > 0 and idx % self._yield_batch_size == 0:
-                await asyncio.sleep(0)
-            chat_id = getattr(item, "chat_id", None)
-            if not chat_id:
-                continue
-            rebuilt.setdefault(str(chat_id), []).append(item)
-        return rebuilt
-
-    async def _enforce_memory_limits(self, buffer: List[Any], index: Dict[str, List[Any]]) -> tuple[List[Any], Dict[str, List[Any]], int]:
-        """强制执行内存限制，使用 heapq 批量淘汰旧数据。"""
-        evicted_count = 0
-        if not buffer:
-            return buffer, index, evicted_count
-
-        overflow_count = len(buffer) - self.max_items
-        if overflow_count > 0:
-            oldest_items = heapq.nsmallest(
-                overflow_count,
-                buffer,
-                key=self._item_lru_timestamp,
-            )
-            evict_identities = {self._item_identity(item) for item in oldest_items}
-            buffer, removed = await self._evict_from_buffer(buffer, evict_identities)
-            evicted_count += removed
-            index = await self._rebuild_chat_index(buffer)
-
-        current_memory = self._estimate_buffer_memory(buffer, index)
-        while current_memory > self.max_memory_bytes and buffer:
-            candidate_count = max(1, min(len(buffer), max(len(buffer) // 10, self.batch_size)))
-            oldest_items = heapq.nsmallest(
-                candidate_count,
-                buffer,
-                key=self._item_lru_timestamp,
-            )
-            evict_identities = {self._item_identity(item) for item in oldest_items}
-            if not evict_identities:
-                break
-
-            buffer, removed = await self._evict_from_buffer(buffer, evict_identities)
-            if removed == 0:
-                break
-
-            evicted_count += removed
-            index = await self._rebuild_chat_index(buffer)
-            current_memory = self._estimate_buffer_memory(buffer, index)
-            await asyncio.sleep(0)
-
-        return buffer, index, evicted_count
-
+    
     def _schedule_initial_load(self) -> None:
         """调度初始加载任务"""
         try:
@@ -668,81 +548,119 @@ class ExpressionCacheModule:
                 self.loading = False
 
     async def _merge_incremental_data(self, incremental_data: List[Any]) -> None:
-        """合并增量数据到缓存（含 chat_id 索引）。"""
+        """合并增量数据到缓存（含 chat_id 索引）
+
+        Args:
+            incremental_data: 增量数据列表
+        """
         with self.buffer_lock:
-            base_buffer = self.buffer_a
-
-        buffer_b_data = list(base_buffer) if base_buffer is not None else []
-
-        existing_pos: Dict[Any, int] = {}
-        for idx, existing in enumerate(buffer_b_data):
-            if idx > 0 and idx % self._yield_batch_size == 0:
-                await asyncio.sleep(0)
-            existing_id = getattr(existing, "id", None)
-            if existing_id is not None:
-                existing_pos[existing_id] = idx
-
-        for idx, item in enumerate(incremental_data):
-            if idx > 0 and idx % self._yield_batch_size == 0:
-                await asyncio.sleep(0)
-
-            item_id = getattr(item, "id", None)
-            if item_id is not None and item_id in existing_pos:
-                buffer_b_data[existing_pos[item_id]] = item
+            # 复制现有数据和索引
+            if self.buffer_a is not None:
+                buffer_b_data = list(self.buffer_a)
+                # 深拷贝 chat_id 索引
+                index_b = {}
+                if self.index_a:
+                    for k, v in self.index_a.items():
+                        index_b[k] = list(v)
             else:
-                buffer_b_data.append(item)
-                if item_id is not None:
-                    existing_pos[item_id] = len(buffer_b_data) - 1
+                buffer_b_data = []
+                index_b = {}
 
-        index_b = await self._rebuild_chat_index(buffer_b_data)
-        buffer_b_data, index_b, evicted = await self._enforce_memory_limits(buffer_b_data, index_b)
-        if evicted > 0:
-            logger.info(f"[ExprCache] 增量合并后 LRU 淘汰: {evicted} 条条目")
+            # 构建 ID 集合用于去重
+            existing_ids = {getattr(item, 'id', None) for item in buffer_b_data}
 
-        tracker_total = len(buffer_b_data)
-        new_memory_usage = self._estimate_buffer_memory(buffer_b_data, index_b)
-        self._tracker["total_count"] = tracker_total
+            # 合并新数据
+            for item in incremental_data:
+                item_id = getattr(item, 'id', None)
+                old_chat_id = None
 
-        with self.buffer_lock:
+                # 更新或追加
+                if item_id in existing_ids:
+                    # 替换已存在的记录，并记录旧 chat_id
+                    for i, existing in enumerate(buffer_b_data):
+                        if getattr(existing, 'id', None) == item_id:
+                            old_chat_id = getattr(existing, 'chat_id', None)
+                            buffer_b_data[i] = item
+                            break
+                else:
+                    # 追加新记录
+                    buffer_b_data.append(item)
+                    existing_ids.add(item_id)
+
+                # 更新 chat_id 索引
+                new_chat_id = getattr(item, 'chat_id', None)
+                if new_chat_id:
+                    chat_key = str(new_chat_id)
+
+                    # 从旧 chat_id 索引中移除（如果 chat_id 发生变化）
+                    if old_chat_id and str(old_chat_id) != chat_key:
+                        old_key = str(old_chat_id)
+                        if old_key in index_b:
+                            index_b[old_key] = [
+                                x for x in index_b[old_key]
+                                if getattr(x, 'id', None) != item_id
+                            ]
+                            # 如果索引为空，移除该键
+                            if not index_b[old_key]:
+                                del index_b[old_key]
+
+                    # 添加到新 chat_id 索引
+                    if chat_key not in index_b:
+                        index_b[chat_key] = []
+
+                    # 移除同 ID 旧项（避免重复）
+                    index_b[chat_key] = [
+                        x for x in index_b[chat_key]
+                        if getattr(x, 'id', None) != item_id
+                    ]
+                    index_b[chat_key].append(item)
+
+            # 更新总数
+            self._tracker["total_count"] = len(buffer_b_data)
+
+            # 原子切换
             self.buffer_b = buffer_b_data
             self.index_b = index_b
-            self._current_memory_usage = new_memory_usage
             self.buffer_a, self.buffer_b = self.buffer_b, None
             self.index_a, self.index_b = self.index_b, None
 
     async def _check_deleted_records(self) -> None:
-        """检测并清理已删除的记录。"""
+        """检测并清理已删除的记录"""
         try:
             from src.common.database.database_model import Expression
             from peewee import fn
 
+            # 1. 快速检测：比较数据库记录数与缓存记录数
             db_count = await asyncio.to_thread(
                 lambda: Expression.select(fn.COUNT(Expression.id)).scalar()
             )
 
             with self.buffer_lock:
-                current_buffer = self.buffer_a
+                if self.buffer_a is None:
+                    return
+                cache_count = len(self.buffer_a)
 
-            if current_buffer is None:
-                return
-
-            cache_count = len(current_buffer)
+            # 如果数量一致，跳过详细检测
             if db_count == cache_count:
                 logger.debug(f"[ExprCache] 记录数一致 ({cache_count})，无需清理")
                 return
 
+            # 2. 数量不一致，执行详细检测
             logger.info(f"[ExprCache] 检测到记录数差异: 数据库 {db_count}, 缓存 {cache_count}，执行清理...")
+
+            # 获取数据库中当前所有 ID
             db_ids = set(await asyncio.to_thread(
                 lambda: [r.id for r in Expression.select(Expression.id)]
             ))
 
-            deleted_ids: set[Any] = set()
-            for idx, item in enumerate(current_buffer):
-                if idx > 0 and idx % self._yield_batch_size == 0:
-                    await asyncio.sleep(0)
-                item_id = getattr(item, "id", None)
-                if item_id is not None and item_id not in db_ids:
-                    deleted_ids.add(item_id)
+            # 获取缓存中的 ID
+            with self.buffer_lock:
+                if self.buffer_a is None:
+                    return
+                cache_ids = {getattr(item, 'id', None) for item in self.buffer_a}
+
+            # 找出已删除的 ID
+            deleted_ids = cache_ids - db_ids
 
             if not deleted_ids:
                 logger.debug("[ExprCache] 未检测到已删除记录")
@@ -750,23 +668,34 @@ class ExpressionCacheModule:
 
             logger.info(f"[ExprCache] 检测到 {len(deleted_ids)} 条已删除记录，执行清理...")
 
-            buffer_b_data: List[Any] = []
-            for idx, item in enumerate(current_buffer):
-                if idx > 0 and idx % self._yield_batch_size == 0:
-                    await asyncio.sleep(0)
-                if getattr(item, "id", None) in deleted_ids:
-                    continue
-                buffer_b_data.append(item)
-
-            index_b = await self._rebuild_chat_index(buffer_b_data)
-            tracker_total = len(buffer_b_data)
-            self._tracker["total_count"] = tracker_total
-            new_memory_usage = self._estimate_buffer_memory(buffer_b_data, index_b)
-
+            # 3. 清理已删除的记录
             with self.buffer_lock:
+                if self.buffer_a is None:
+                    return
+
+                # 过滤已删除的记录
+                buffer_b_data = [
+                    item for item in self.buffer_a
+                    if getattr(item, 'id', None) not in deleted_ids
+                ]
+
+                # 更新 chat_id 索引
+                index_b = {}
+                if self.index_a:
+                    for k, v in self.index_a.items():
+                        filtered = [
+                            x for x in v
+                            if getattr(x, 'id', None) not in deleted_ids
+                        ]
+                        if filtered:
+                            index_b[k] = filtered
+
+                # 更新总数
+                self._tracker["total_count"] = len(buffer_b_data)
+
+                # 原子切换
                 self.buffer_b = buffer_b_data
                 self.index_b = index_b
-                self._current_memory_usage = new_memory_usage
                 self.buffer_a, self.buffer_b = self.buffer_b, None
                 self.index_a, self.index_b = self.index_b, None
 
@@ -811,17 +740,13 @@ class ExpressionCacheModule:
                     buffer_b_data.extend(batch)
 
                     # 更新最大 ID
-                    for idx, item in enumerate(batch):
-                        if idx > 0 and idx % self._yield_batch_size == 0:
-                            await asyncio.sleep(0)
+                    for item in batch:
                         item_id = getattr(item, 'id', 0)
                         if item_id > max_id:
                             max_id = item_id
                     
                     # 构建索引（chat_id -> expressions）
-                    for idx, expr in enumerate(batch):
-                        if idx > 0 and idx % self._yield_batch_size == 0:
-                            await asyncio.sleep(0)
+                    for expr in batch:
                         chat_id = getattr(expr, "chat_id", None)
                         if not chat_id:
                             continue
@@ -847,17 +772,11 @@ class ExpressionCacheModule:
             if self._stopped:
                 logger.info("[ExprCache] 加载被中止")
                 return
-
-            # P0-001: 应用内存限制（LRU 淘汰）
-            buffer_b_data, index_b, evicted = await self._enforce_memory_limits(buffer_b_data, index_b)
-            if evicted > 0:
-                logger.info(f"[ExprCache] LRU 淘汰: {evicted} 条条目以达到内存上限")
-
+            
             # 加载完成，原子切换
             with self.buffer_lock:
                 self.buffer_b = buffer_b_data
                 self.index_b = index_b
-                self._current_memory_usage = self._estimate_buffer_memory(buffer_b_data, index_b)
 
                 # 原子切换：buffer_b/index_b → buffer_a/index_a
                 self.buffer_a, self.buffer_b = self.buffer_b, None
@@ -1022,11 +941,9 @@ class ExpressionCacheModule:
             统计信息字典
         """
         now = time.time()
-        memory_bytes = self.get_memory_usage()
         return {
             "size": self.size(),
-            "memory_bytes": memory_bytes,
-            "memory_mb": round(memory_bytes / (1024 * 1024), 2),
+            "memory_bytes": self.get_memory_usage(),
             "last_refresh": self.last_refresh,
             "loading": self.loading,
             # chat_id 索引统计
@@ -1046,19 +963,11 @@ class ExpressionCacheModule:
             "incremental_refresh_interval": self._incremental_refresh_interval,
             "incremental_threshold_ratio": self._incremental_threshold_ratio,
             "full_rebuild_interval": self._full_rebuild_interval,
-            # P0-001: 内存限制信息
-            "max_items": self.max_items,
-            "max_memory_mb": self.max_memory_bytes // (1024 * 1024),
-            "memory_usage_ratio": round(memory_bytes / self.max_memory_bytes, 4) if self.max_memory_bytes > 0 else 0,
-            "items_usage_ratio": round(self.size() / self.max_items, 4) if self.max_items > 0 else 0,
             **self.stats.total(),
         }
 
 
-def apply_expression_cache(
-    cache_manager,
-    config: Optional[Dict[str, Any]] = None,
-) -> Optional[ExpressionCacheModule]:
+def apply_expression_cache(cache_manager) -> Optional[ExpressionCacheModule]:
     """应用表达式缓存补丁。
 
     MaiBot 核心已不再存在 `src.plugins.expression.expression_manager.get_all_expressions`。
@@ -1095,20 +1004,8 @@ def apply_expression_cache(
         }
 
     try:
-        cfg = config or {}
-
         # 创建缓存实例
-        cache = ExpressionCacheModule(
-            batch_size=int(cfg.get("batch_size", 100)),
-            batch_delay=float(cfg.get("batch_delay", 0.05)),
-            refresh_interval=int(cfg.get("refresh_interval", 3600)),
-            incremental_refresh_interval=int(cfg.get("incremental_refresh_interval", 600)),
-            incremental_threshold_ratio=float(cfg.get("incremental_threshold_ratio", 0.1)),
-            full_rebuild_interval=int(cfg.get("full_rebuild_interval", 86400)),
-            deletion_check_interval=int(cfg.get("deletion_check_interval", 10)),
-            max_items=int(cfg.get("max_items", 10000)),
-            max_memory_mb=int(cfg.get("max_memory_mb", 200)),
-        )
+        cache = ExpressionCacheModule()
 
         # 注册到缓存管理器
         cache_manager.register_cache("expression_cache", cache)

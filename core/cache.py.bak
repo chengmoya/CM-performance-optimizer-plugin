@@ -93,16 +93,6 @@ class TTLCache:
                 self.ts.pop(kk, None)
                 removed += 1
         return removed
-
-    def cleanup_expired_sync(self) -> int:
-        """显式清理全部过期条目（O(n)）。
-
-        说明：
-        - 默认读写路径不主动全表扫描，避免在热路径引入 O(n)。
-        - 需要批量回收时可由后台任务调用本方法。
-        """
-        with self._lock:
-            return self._purge_expired_locked(time.time())
     
     # ========== 同步方法 ==========
     
@@ -133,17 +123,17 @@ class TTLCache:
         """
         with self._lock:
             now = time.time()
-
+            self._purge_expired_locked(now)
+            
             if k in self.data:
                 self.data.move_to_end(k)
-
+            
             self.data[k] = v
             self.ts[k] = now
-
-            # O(1) LRU 淘汰：不做全表扫描，超量时仅弹出链表头。
+            
             while len(self.data) > self.max_size:
-                old, _ = self.data.popitem(last=False)
-                self.ts.pop(old, None)
+                old = next(iter(self.data))
+                del self.data[old], self.ts[old]
     
     def invalidate_sync(self, k: str) -> None:
         """同步使缓存失效

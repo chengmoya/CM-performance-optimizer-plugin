@@ -74,4 +74,13 @@ class PerfOptStopHandler(BaseEventHandler):
                     logger.info("[PerfOpt] ✓ 插件已停止，补丁已回滚")
                 except Exception as e:
                     logger.error(f"[PerfOpt] 停止失败: {e}")
+            
+            # P0-002 修复：重置所有单例状态，确保热重载后状态完全清理
+            try:
+                # 导入单例类并调用 reset
+                from ..plugin import _PerformanceOptimizer, _CacheManager
+                _PerformanceOptimizer.reset()
+                logger.info("[PerfOpt] ✓ 单例状态已重置，热重载准备就绪")
+            except Exception as e:
+                logger.warning(f"[PerfOpt] 重置单例状态失败: {e}")
         return (True, True, None, None, None)

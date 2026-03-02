@@ -36,7 +36,7 @@ jargon_cache_enabled = true
 jargon_matcher_automaton_enabled = true
 
 # 是否启用知识图谱缓存
-kg_cache_enabled = true
+kg_cache_enabled = false
 
 # 是否启用Levenshtein距离加速
 levenshtein_fast_enabled = true
@@ -164,7 +164,7 @@ incremental_threshold_ratio = 0.1
 full_rebuild_interval = 86400
 
 # 删除检查间隔(秒) (5-100)
-deletion_check_interval = 10
+deletion_check_interval = 50
 
 # ConfigSection(title='知识图谱缓存配置', description='知识图谱缓存，加速知识检索', icon='🧠', collapsed=True, order=6)
 
@@ -189,7 +189,7 @@ incremental_threshold_ratio = 0.1
 full_rebuild_interval = 86400
 
 # 删除检查间隔(秒) (5-100)
-deletion_check_interval = 10
+deletion_check_interval = 50
 
 # 是否使用Parquet格式
 use_parquet = true
@@ -238,7 +238,7 @@ enable_change_notifications = true
 enable_stats = true
 
 # 统计间隔(秒) (10-3600)
-stats_interval = 60
+stats_interval = 120
 
 # 是否启用内存监控
 enable_memory_monitor = true
